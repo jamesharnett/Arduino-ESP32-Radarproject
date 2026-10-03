@@ -1,5 +1,7 @@
 # RadarLink — ESP32 radar + LIDAR sensor node with an Arduino GIGA display and a uConsole viewer
 
+[![CI](https://github.com/jamesharnett/Arduino-ESP32-Radarproject/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesharnett/Arduino-ESP32-Radarproject/actions/workflows/ci.yml)
+
 A wireless motion-tracking and room-outline system for remote surveillance. One
 battery-powered **sensor node** (Seeed XIAO ESP32-S3) reads an Ai-Thinker
 **RD-03D 24 GHz radar** and, optionally, an LDROBOT **LD19 360° LIDAR**, hosts
@@ -439,16 +441,21 @@ Measured bounding boxes:
 | `top radarmodule.stl` | 47 × 31 × 87 | XIAO + RD-03D + 602560 LiPo |
 | `bottom radarmodule.stl` | 47 × 6 × 67 | radar node base plate |
 
-They fit the Level 1 radar node and the GIGA display. **Nothing yet
-accommodates the LD19** (about 38 mm diameter, 35 mm tall, needs a clear 360°
-view) or a larger cell; a Level 2 enclosure is an open item. Check the GIGA body
-in your slicer before printing: the board is 101.5 mm long inside a 105 mm body.
+They fit the Level 1 radar node and the GIGA display. For Level 2 there is a
+**parametric OpenSCAD draft**, `CAD files/level2_sensor_node.scad` (with rendered
+`level2_sensor_node_base.stl` / `_lid.stl` and a preview image): a 78 × 100 × 32 mm
+box for the XIAO, RD-03D, boost, charger and a pouch cell, with the LD19 bolted
+on the lid. It was designed from datasheet dimensions and has not been printed;
+measure your parts and read `CAD files/README.md` before printing. Check the GIGA
+body in your slicer before printing: the board is 101.5 mm long inside a 105 mm body.
 
 -------------------------------------------------------------------------------
 
 ## Roadmap
 
-1. **Level 2 enclosure** for the LD19 and a ≥ 3000 mAh cell.
+1. **Level 2 enclosure**: a parametric OpenSCAD draft exists (`CAD files/`); it
+   still needs a measured LD19 hole pattern, a test print and a pocket for a
+   ≥ 3000 mAh cell.
 2. ~~Intrusion logic on the uConsole~~ — done (*Intrusion detection*), including
    ignore zones, scheduled arming and alert snapshots.
 3. ~~Off-site viewing~~ — done (*Off-site viewing: the relay*). The 4G module and
