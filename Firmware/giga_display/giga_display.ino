@@ -30,6 +30,8 @@
 #include <WiFiUdp.h>
 #include "Arduino_GigaDisplay_GFX.h"
 #include "Arduino_GigaDisplayTouch.h"
+#include "pinDefinitions.h"
+#include "mbed.h"
 
 #include "config.h"
 #include "radar_protocol.h"
@@ -113,8 +115,27 @@ static bool     touchDownLast = false;
 static uint32_t lastTouchToggleMs = 0;
 
 /* ---------------------------------------------------------------- buzzer */
+/* The Mbed core's tone() allocates a DigitalOut on every call and never frees
+ * it (Tone::stop() nulls the pointer before the destructor deletes it), so a
+ * sketch that pings several times a second exhausts the heap after an hour or
+ * two. Drive the piezo with one Ticker + DigitalOut owned by the sketch instead. */
+static mbed::DigitalOut *buzzerOut = nullptr;
+static mbed::Ticker      buzzerTicker;
 static uint32_t lastBeepMs = 0, beepStartMs = 0;
 static bool     beepActive = false;
+static int32_t  cachedRssi = 0;
+static uint32_t lastTouchPollMs = 0;
+
+static void buzzerToggle() { if (buzzerOut) *buzzerOut = !*buzzerOut; }
+static void buzzerStart(uint16_t freqHz) {
+    if (!buzzerOut || freqHz == 0) return;
+    buzzerTicker.detach();
+    buzzerTicker.attach(mbed::callback(buzzerToggle), std::chrono::microseconds(500000UL / freqHz));
+}
+static void buzzerStop() {
+    buzzerTicker.detach();
+    if (buzzerOut) *buzzerOut = 0;
+}
 
 /* ---------------------------------------------------------------- timing */
 static uint32_t lastFrameMs = 0, lastSecondMs = 0, lastDebugMs = 0, framesThisSec = 0, fps = 0;
@@ -287,8 +308,8 @@ static float closestShownTargetMm() {
 }
 
 static void updateBuzzer(uint32_t now) {
-    if (buzzerMuted) { if (beepActive) { noTone(BUZZER_PIN); beepActive = false; } return; }
-    if (beepActive && (now - beepStartMs) >= BEEP_DUR_MS) beepActive = false;
+    if (buzzerMuted) { if (beepActive) { buzzerStop(); beepActive = false; } return; }
+    if (beepActive && (now - beepStartMs) >= BEEP_DUR_MS) { buzzerStop(); beepActive = false; }
     float dist = closestShownTargetMm();
     if (dist < 0) return;
     float d = constrain(dist, BEEP_DIST_MIN_MM, BEEP_DIST_MAX_MM);
@@ -296,7 +317,7 @@ static void updateBuzzer(uint32_t now) {
     uint32_t interval = BEEP_INTERVAL_MIN_MS + (uint32_t)(t * (BEEP_INTERVAL_MAX_MS - BEEP_INTERVAL_MIN_MS));
     uint16_t freq     = BEEP_FREQ_MAX_HZ - (uint16_t)(t * (BEEP_FREQ_MAX_HZ - BEEP_FREQ_MIN_HZ));
     if (!beepActive && (now - lastBeepMs) >= interval) {
-        tone(BUZZER_PIN, freq, BEEP_DUR_MS);
+        buzzerStart(freq);
         beepActive = true; beepStartMs = now; lastBeepMs = now;
     }
 }
@@ -412,7 +433,7 @@ static void drawHud(uint32_t now) {
     snprintf(buf, sizeof buf, "rx %lu/s  drop %lu  fps %lu", (unsigned long)rxPerSec, (unsigned long)rxDropped, (unsigned long)fps);
     hudLine(108, buf, C_GDIM);
     if (linkUp) {
-        snprintf(buf, sizeof buf, "rssi %ld dBm", (long)WiFi.RSSI());
+        snprintf(buf, sizeof buf, "rssi %ld dBm", (long)cachedRssi);   /* refreshed once a second, not per frame */
         hudLine(120, buf, C_GDIM);
     }
 
@@ -455,6 +476,8 @@ static void renderFrame(uint32_t now) {
 
 /* =================================================================== touch */
 static void checkTouch(uint32_t now) {
+    if ((now - lastTouchPollMs) < 20) return;      /* one I2C read every 20 ms is plenty */
+    lastTouchPollMs = now;
     GDTpoint_t points[5];
     uint8_t contacts = touch.getTouchPoints(points);
     bool touching = contacts > 0;
@@ -494,8 +517,7 @@ static void printDebug(uint32_t now) {
 /* =================================================================== setup */
 void setup() {
     Serial.begin(115200);
-    pinMode(BUZZER_PIN, OUTPUT);
-    noTone(BUZZER_PIN);
+    buzzerOut = new mbed::DigitalOut(digitalPinToPinName(BUZZER_PIN), 0);
 
     display.begin();
     display.setRotation(1);
@@ -528,6 +550,7 @@ void loop() {
         lastSecondMs = now;
         rxPerSec = rxThisSec; rxThisSec = 0;
         fps = framesThisSec; framesThisSec = 0;
+        if (linkUp) cachedRssi = WiFi.RSSI();        /* a WHD IOCTL round trip: once a second, off the frame path */
     }
     if ((now - lastDebugMs) >= DEBUG_INTERVAL_MS) { lastDebugMs = now; printDebug(now); }
 }

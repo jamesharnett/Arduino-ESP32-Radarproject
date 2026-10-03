@@ -302,9 +302,11 @@ g++ -std=c++11 -Wall -Wextra -Werror -I ../Firmware/sensor_node_esp32s3 ../Firmw
 
 * **LIDAR rotation.** The LD19's zero angle points wherever its connector
   points. Stand in front of the node: the matching LIDAR return must appear at
-  the top of the plot. If it does not, set `LIDAR_ANGLE_OFFSET_DEG` in the GIGA
-  `config.h` and `--offset` (or `LIDAR_ANGLE_OFFSET_DEG`) in the viewer to the
-  angle you read off the plot. The procedure is in `docs/TESTING.md`.
+  the top of the plot. If it does not, read the angle where it appears, clockwise
+  from the top, and set `LIDAR_ANGLE_OFFSET_DEG` in the GIGA `config.h` and
+  `--offset` (or `LIDAR_ANGLE_OFFSET_DEG`) in the viewer to **minus** that angle:
+  a return at 3 o'clock is +90°, so the offset is −90. The procedure is in
+  `docs/TESTING.md`.
 * **Radar mirror.** Walk to the left of the node; the dot must move left. If it
   moves right the module is mounted upside down: flip it or set `RADAR_MIRROR_X 1`.
 * The radar's forward direction is always "up" on both displays; mount the
@@ -341,9 +343,13 @@ the README) must not be used.
   outdoors with line of sight. Walls cost range for the Wi-Fi and far more for
   the 24 GHz radar.
 * The GIGA's Mbed `WiFiUDP` buffer is 508 bytes, which is why LIDAR datagrams
-  carry at most 96 points. Its `WiFi.begin()` blocks for up to 8 s per attempt;
-  the screen shows the attempt.
-* The GIGA renders at about 15 fps; the uConsole at 30.
+  carry at most 96 points. Its `WiFi.begin()` is blocking: a network scan, up to
+  8 s to join and, if the join succeeds but DHCP does not answer, up to 60 s
+  more. The screen shows the attempt and the display retries by itself.
+* The GIGA renders at about 15 fps; the uConsole at 30. The GIGA's Wi-Fi
+  receive path queues only about five datagrams, so anything that stalls its
+  loop for more than ~70 ms drops LIDAR packets silently (visible as a lower
+  `rx/s`, not as `drop`).
 * Runtime on the suggested cells: about 4 h for the radar-only node, about 4 h
   for the LIDAR node on 3000 mAh, about 6 h for the GIGA display on 5000 mAh.
   The DW01 protection only cuts off at ~2.4 V, too deep for LiPo health, so

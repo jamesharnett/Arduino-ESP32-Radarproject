@@ -115,7 +115,7 @@ static void subscriberHello(const IPAddress &ip, uint16_t port, const RlHelloPac
             return;
         }
         if (!subs[i].used && freeSlot < 0) freeSlot = i;
-        if (subs[i].lastHelloMs < subs[oldest].lastHelloMs) oldest = i;
+        if ((int32_t)(subs[i].lastHelloMs - subs[oldest].lastHelloMs) < 0) oldest = i;   /* wrap-safe */
     }
     int slot = freeSlot >= 0 ? freeSlot : oldest;
     subs[slot] = {ip, port, h.receiver_kind, h.wants, now, true};
@@ -146,6 +146,11 @@ static void pollHello(uint32_t now) {
     while ((sz = udp.parsePacket()) > 0) {
         uint8_t buf[64];
         int n = udp.read(buf, sizeof(buf));
+        /* Drop whatever is left of a longer datagram. In arduino-esp32 (2.x and
+         * 3.x) parsePacket() returns 0 for as long as a partially read datagram
+         * sits in its buffer, so without this one stray oversized packet would
+         * silence HELLO reception until the next power cycle. */
+        udp.flush();
         if (n <= 0) continue;
         uint8_t type; uint16_t seq;
         if (!rl_read_header(buf, (size_t)n, &type, &seq)) continue;
@@ -331,6 +336,12 @@ static void startAccessPoint(uint32_t now) {
 void setup() {
     pinMode(STATUS_LED_PIN, OUTPUT);
     Serial.begin(DEBUG_BAUD);
+#if ARDUINO_USB_CDC_ON_BOOT
+    /* A host that opened the port and then stopped reading (monitor closed, PC
+     * asleep) would otherwise make every print block for up to 2 s, overrunning
+     * the LD19's UART buffer. With a 0 timeout the output is dropped instead. */
+    Serial.setTxTimeoutMs(0);
+#endif
     delay(200);                                   /* let USB CDC enumerate; never wait for a host */
     Serial.println();
     Serial.println("RadarLink sensor node — RD-03D" 

@@ -10,7 +10,7 @@ Keys: ESC/Q quit · UP/DOWN or +/- zoom · M mute · L lidar on/off · F fullscr
       SPACE pause (replay) · R start/stop recording
 
 Examples:
-    python3 radar_viewer.py                          # fullscreen, node at the default gateway
+    python3 radar_viewer.py                          # fullscreen, node at 192.168.4.1
     python3 radar_viewer.py --windowed --node 192.168.4.1
     python3 radar_viewer.py --record walk.rdl        # capture raw datagrams
     python3 radar_viewer.py --replay walk.rdl --windowed --loop
@@ -30,7 +30,7 @@ import radar_protocol as rp  # noqa: E402
 import radar_state as rs     # noqa: E402
 
 # ------------------------------------------------------------------ defaults
-DEFAULT_NODE = "192.168.4.1"
+DEFAULT_NODE = "192.168.4.1"     # fixed by the sensor node's softAPConfig(); use --node gateway to auto-detect
 LIDAR_ANGLE_OFFSET_DEG = 0.0      # rotate the point cloud so the sensor's "forward" is up
 LIDAR_CLOCKWISE = True            # LD19 angles increase clockwise seen from above
 LIDAR_TTL_S = 0.5
@@ -411,7 +411,7 @@ class Viewer:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--node", default=None, help=f"sensor node IP (default: Wi-Fi gateway, else {DEFAULT_NODE})")
+    p.add_argument("--node", default=DEFAULT_NODE, help=f"sensor node IP (default {DEFAULT_NODE}; 'gateway' uses the default route, which breaks when RadarSystem is set ipv4.never-default)")
     p.add_argument("--windowed", action="store_true", help="run in a window instead of fullscreen")
     p.add_argument("--size", nargs=2, type=int, default=(1280, 720), metavar=("W", "H"), help="window size with --windowed")
     p.add_argument("--range", type=float, default=8.0, help="initial range in metres: 2, 4, 8 or 12")
@@ -430,7 +430,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--exit-on-replay-end", action="store_true", help="exit when the replay finishes")
     p.add_argument("--replay-silent", action="store_true", help=argparse.SUPPRESS)
     args = p.parse_args(argv)
-    if args.node is None:
+    if args.node == "gateway":
         args.node = default_gateway() or DEFAULT_NODE
     return args
 

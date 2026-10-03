@@ -14,8 +14,9 @@ The branches are based on `main`, which is identical to the upstream `main`
 | `fix/xiao-transmitter-nonblocking` | `Stevee87/Arduino-ESP32-Radarproject` | transmitter `.ino` | non-blocking Wi-Fi connect with retry instead of a 20 s block and `ESP.restart()`; the 650 ms radar re-configuration every 60 s turned into a timed step sequence; clustering keeps the speed with the larger magnitude |
 | `fix/radar-project-uconsole-struct-format` | `Stevee87/Radar-project-Uconsole` | `upstream-patches/…/0001-*.patch` | the Python receiver unpacked 29 of the 32 packet bytes and corrupted targets 2 and 3; shipped as a `git am` patch with instructions because this fork has no fork of that repository |
 
-Each code branch was compiled for its board (esp32 core 3.3.12 for the XIAO,
-Arduino Mbed OS GIGA Boards 4.6.0 for the GIGA) before it was pushed. The
+Each code branch was compiled for its board (esp32 core 2.0.9 for the XIAO, whose
+APIs used here are unchanged in 3.x; Arduino Mbed OS GIGA Boards 4.6.0 for the GIGA)
+before it was pushed. The
 receiver robustness branch only builds on Linux once the include-name fix is
 also merged; the two are kept separate so the one-line fix can land on its own.
 

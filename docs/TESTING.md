@@ -81,8 +81,9 @@ counters appear in the top-left HUD. On the sensor node you will see
 
 | What you see | Meaning |
 |---|---|
-| `connect failed, status 4` repeating, screen says "last attempt failed (code 4)" | wrong SSID/password, node not powered, or the GIGA's antenna is missing |
-| `connect failed, status 6`, every attempt | the GIGA cannot see the SSID at all: antenna, range, or the node is still booting |
+| `connect failed, status 4` repeating, screen says "last attempt failed (code 4)" | the Mbed core returns 4 (`WL_CONNECT_FAILED`) both when the SSID is not seen in its scan and when the join is refused: node not powered or still booting, out of range, antenna missing, or wrong SSID/password |
+| `connect failed, status 0` | no Wi-Fi module answered: run the WiFiFirmwareUpdater example |
+| each attempt takes a minute | the join worked but DHCP did not answer (60 s core timeout): power-cycle the node |
 | "Failed to mount the filesystem containing the WiFi firmware" on serial | run *File → Examples → STM32H747_System → WiFiFirmwareUpdater* once |
 | link up, `data=none`, HUD "waiting for sensor node" | packets not arriving: wrong `RECEIVER_WANTS`, or the node shows `subs=0` (HELLO not received: both on the same channel? check node log) |
 | `drop` counting up | packets arriving out of order; harmless unless large |
