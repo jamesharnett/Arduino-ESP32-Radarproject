@@ -96,7 +96,9 @@ Firmware/sensor_node_esp32s3/   ESP32-S3 sketch: config.h, radar_protocol.h, rd0
 Firmware/giga_display/          GIGA R1 sketch: config.h, radar_protocol.h (identical copy)
 Firmware/tests/host/            parser unit tests that run on your PC with g++
 Firmware/legacy/                the original v1 sketches, reference only (incompatible protocol)
-uconsole/                       radar_viewer.py, radar_protocol.py, radar_state.py, fake_sensor_node.py, tests/
+uconsole/                       radar_viewer.py (display), radar_relay.py (headless relay + alarm + web view),
+                                radar_intrusion.py, radar_protocol.py, radar_state.py, fake_sensor_node.py, tests/
+.github/workflows/ci.yml        tests and both firmware builds on every push; tools/check.sh runs the same locally
 docs/PROTOCOL.md                wire format
 docs/TESTING.md                 bring-up, expected serial output, calibration, troubleshooting
 tools/check_protocol_sync.py    fails if the two radar_protocol.h copies differ
@@ -313,6 +315,42 @@ python3 radar_viewer.py --armed --alert-cmd 'curl -s -d "RadarLink: $ALERT_KIND 
 furniture moves. The detector lives in `uconsole/radar_intrusion.py` and is
 unit tested without hardware.
 
+More options, shared by the viewer and the relay below:
+
+* `--ignore-zone A1:A2[:DMIN:DMAX]` ignores a wedge (degrees clockwise from
+  forward, optional range band in metres), for example a cat's corridor or a
+  curtain: `--ignore-zone 250:290:0:1.5`. Repeatable; drawn as a dim wedge.
+* `--arm-schedule 22:00-06:00` arms and disarms on a daily window (local time,
+  may wrap midnight). Manual arming still works in between.
+* `--snapshot-dir DIR` writes a JSON file per alert start with the live LIDAR
+  buckets, radar targets and the alert, for later review or tuning.
+
+### 5. Off-site viewing: the relay
+
+`radar_relay.py` is the headless twin of the viewer. It subscribes to the sensor
+node like any receiver, then **re-serves the stream** to remote viewers, **runs
+the intrusion detector** without a screen, and **serves a web view** for phones:
+
+```bash
+# on the uConsole (or any Linux box on the sensor node's Wi-Fi):
+python3 radar_relay.py --web 8080 --web-token s3cret --armed --alert-cmd '...'
+# on a laptop anywhere that can reach the uConsole, e.g. over Tailscale:
+python3 radar_viewer.py --node <uConsole address> --windowed
+# on a phone: http://<uConsole address>:8080/?token=s3cret
+```
+
+Remote viewers send their `HELLO` to the relay instead of the node; the relay
+forwards every RADAR/LIDAR/STATUS datagram unchanged, so the sensor node never
+has to be reachable from outside its own network. For true off-site use put the
+uConsole on the internet through its 4G module (`uconsole-4g-cm4 enable`) and
+join it to a [Tailscale](https://tailscale.com/download/linux) tailnet; the
+relay's UDP and web ports are then reachable only from your own devices. The web
+view's arm/disarm/learn buttons are protected by `--web-token`; the plot itself
+is read-only. `uconsole/radar-relay.service` runs it at boot.
+
+The relay runs alongside the display viewer on the same uConsole if you want
+both; the sensor node serves up to four subscribers.
+
 ### Testing without hardware
 
 ```bash
@@ -411,12 +449,10 @@ in your slicer before printing: the board is 101.5 mm long inside a 105 mm body.
 ## Roadmap
 
 1. **Level 2 enclosure** for the LD19 and a ≥ 3000 mAh cell.
-2. ~~Intrusion logic on the uConsole~~ — done, see *Intrusion detection* above.
-   Open items: per-zone arming (ignore a pet corridor), scheduled arming, and
-   persistence of alert history beyond the CSV log.
-3. **Off-site viewing:** the uConsole's 4G module plus Tailscale (or an MQTT
-   relay) forwarding the UDP stream to a phone or laptop. The radio layer on the
-   ESP32 stays as it is.
+2. ~~Intrusion logic on the uConsole~~ — done (*Intrusion detection*), including
+   ignore zones, scheduled arming and alert snapshots.
+3. ~~Off-site viewing~~ — done (*Off-site viewing: the relay*). The 4G module and
+   Tailscale are configuration on the uConsole, not code.
 4. **True 3D (stage three):** a Unitree L2 or Livox Mid-360 connected to the
    uConsole over Ethernet/USB with ROS 2 or the vendor SDK; the ESP32 node then
    carries only the radar as the low-power motion trigger. Not an ESP32 or GIGA

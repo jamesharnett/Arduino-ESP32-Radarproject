@@ -205,3 +205,105 @@ class DetectorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZoneAndScheduleTests(unittest.TestCase):
+    def test_zone_parse_and_contains(self):
+        z = ri.IgnoreZone.parse("350:10:1:3")
+        self.assertTrue(z.contains(355, 2000))
+        self.assertTrue(z.contains(5, 1000))
+        self.assertFalse(z.contains(20, 2000), "outside the wedge")
+        self.assertFalse(z.contains(0, 4000), "outside the range band")
+        z2 = ri.IgnoreZone.parse("90:180")
+        self.assertTrue(z2.contains(135, 12000))
+        with self.assertRaises(ValueError):
+            ri.IgnoreZone.parse("1:2:3")
+
+    def test_zone_suppresses_lidar_and_radar(self):
+        ref, _ = learn_reference()
+        lidar = rs.LidarStore(ttl_s=0.5)
+        radar = rs.RadarTracks(hold_s=0.4, still_timeout_s=0)
+        det = ri.IntrusionDetector(ref, dwell_s=0.5, min_buckets=3)
+        det.armed = True
+        det.zones = [ri.IgnoreZone(300, 340)]          # the corner where the parcel will appear
+        box = (-1000.0, 1200.0, 250.0)                  # at about 320 degrees
+        for t in (0.0, 0.3, 0.6, 0.9):
+            for pkt in scan_packets(intruder=box):
+                lidar.update(pkt, t)
+            radar.update(rp.RadarPacket(1, [rp.RadarTarget(-1000, 1200, 30, True), rp.RadarTarget(), rp.RadarTarget()]), t)
+            det.update(t, lidar, radar)
+        self.assertEqual(det.active(), [], "changes inside an ignore zone raise nothing")
+        det.zones = []
+        det.update(1.0, lidar, radar)
+        self.assertEqual(len(det.active()), 1, "same scene without the zone alerts")
+
+    def test_schedule_window_and_wrap(self):
+        import datetime as dt
+        s = ri.ArmSchedule("22:00-06:00")
+        self.assertTrue(s.active(dt.datetime(2026, 1, 1, 23, 30)))
+        self.assertTrue(s.active(dt.datetime(2026, 1, 1, 5, 59)))
+        self.assertFalse(s.active(dt.datetime(2026, 1, 1, 6, 0)))
+        self.assertFalse(s.active(dt.datetime(2026, 1, 1, 12, 0)))
+        d = ri.ArmSchedule("09:00-17:00")
+        self.assertTrue(d.active(dt.datetime(2026, 1, 1, 9, 0)))
+        self.assertFalse(d.active(dt.datetime(2026, 1, 1, 17, 0)))
+        self.assertEqual(d.poll(dt.datetime(2026, 1, 1, 8, 0)), False)
+        self.assertIsNone(d.poll(dt.datetime(2026, 1, 1, 8, 30)))
+        self.assertEqual(d.poll(dt.datetime(2026, 1, 1, 9, 5)), True)
+        with self.assertRaises(ValueError):
+            ri.ArmSchedule("25:00-06:00")
+
+    def test_snapshot_contents(self):
+        ref, _ = learn_reference()
+        lidar = rs.LidarStore(ttl_s=0.5)
+        radar = rs.RadarTracks(still_timeout_s=0)
+        for pkt in scan_packets(intruder=(500.0, 1500.0, 250.0)):
+            lidar.update(pkt, 1.0)
+        radar.update(rp.RadarPacket(1, [rp.RadarTarget(500, 1500, 40, True), rp.RadarTarget(), rp.RadarTarget()]), 1.0)
+        a = ri.Alert(7, "fused", 18.4, 1580.0, 500.0, 1500.0, 12.0, 0.5, 1.0, 0.95, [30, 31, 32], 0)
+        snap = ri.snapshot(1.1, lidar, radar, a, lidar_offset_deg=0.0)
+        self.assertEqual(snap["alert"]["id"], 7)
+        self.assertEqual(snap["alert"]["buckets"], [30, 31, 32])
+        self.assertEqual(snap["radar"][0]["x_mm"], 500)
+        self.assertGreater(len(snap["lidar"]), 600)
+        json.dumps(snap)   # must be serialisable
+
+
+class RuntimeTests(unittest.TestCase):
+    def test_runtime_learns_arms_logs_and_snapshots(self):
+        import argparse
+        parser = argparse.ArgumentParser()
+        ri.DetectionRuntime.add_arguments(parser)
+        with tempfile.TemporaryDirectory() as d:
+            args = parser.parse_args(["--baseline", os.path.join(d, "b.json"), "--learn", "2",
+                                      "--alert-log", os.path.join(d, "a.log"), "--snapshot-dir", os.path.join(d, "snaps"),
+                                      "--ignore-zone", "100:120"])
+            logs = []
+            rt = ri.DetectionRuntime(args, lidar_offset_deg=0.0, log=logs.append)
+            lidar = rs.LidarStore(ttl_s=0.5)
+            radar = rs.RadarTracks(still_timeout_s=0)
+            empty = rp.RadarPacket(1, [rp.RadarTarget(), rp.RadarTarget(), rp.RadarTarget()])
+            t = 0.0
+            while t < 2.6:                               # empty room: learning completes at 2 s
+                for pkt in scan_packets():
+                    lidar.update(pkt, t)
+                    rt.on_lidar_packet(pkt)
+                radar.update(empty, t)
+                rt.tick(t, True, lidar, radar)
+                t += 0.1
+            self.assertTrue(rt.armed)
+            self.assertTrue(os.path.exists(os.path.join(d, "b.json")))
+            person = (500.0, 1500.0, 250.0)
+            events = []
+            for t in (3.0, 3.2, 3.4, 3.7):
+                for pkt in scan_packets(intruder=person):
+                    lidar.update(pkt, t)
+                radar.update(rp.RadarPacket(2, [rp.RadarTarget(520, 1480, 40, True), rp.RadarTarget(), rp.RadarTarget()]), t)
+                events += rt.tick(t, True, lidar, radar)
+            self.assertTrue(any(e == "start" for e, _ in events))
+            rt.close()
+            rows = open(os.path.join(d, "a.log")).read().splitlines()
+            self.assertEqual(rows[0].split(",")[1], "event")
+            self.assertTrue(any(",start," in r for r in rows[1:]))
+            self.assertEqual(len(os.listdir(os.path.join(d, "snaps"))), 1)
+            self.assertTrue(any("ARMED" in m for m in logs))

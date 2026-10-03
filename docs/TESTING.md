@@ -182,6 +182,29 @@ On hardware:
 The baseline is saved to `baseline.json` in the working directory and loaded on
 the next start; re-learn after moving furniture.
 
+## 8. Relay and web view
+
+Bench test with the simulator, three terminals:
+
+```bash
+python3 fake_sensor_node.py --quiet-room --intruder-after 30
+python3 radar_relay.py --node 127.0.0.1 --serve-port 4211 --web 8080 --learn 10 --baseline /tmp/b.json
+python3 radar_viewer.py --node 127.0.0.1 --node-port 4211 --windowed      # a "remote" viewer via the relay
+```
+
+(`--serve-port 4211` only because the fake node already holds 4210 on this
+machine; on the uConsole the relay uses 4210 and remote viewers need no port
+option.) Expected: the relay logs `+ remote viewer 127.0.0.1:...`, the viewer
+shows `DATA OK` with the same scene, `http://localhost:8080/` draws it in the
+browser, and the alert at ~30 s appears in the relay log, in the viewer's own
+detector if armed, and on the web page.
+
+On the uConsole: install the service (`uconsole/radar-relay.service`), check
+`journalctl -u radar-relay -f` for `[stat] data=ok`, then from a phone on the
+same Wi-Fi open `http://<uConsole IP>:8080/`. For off-site access install
+Tailscale, `tailscale up`, and use the tailnet address instead; test the web
+page from mobile data with Wi-Fi off on the phone.
+
 ## Recording a session
 
 ```bash

@@ -159,9 +159,10 @@ def serve(port: int, verbose: bool, scene: Scene) -> None:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("", port))
     sock.setblocking(False)
+    port = sock.getsockname()[1]
     subs: Dict[Tuple[str, int], Tuple[float, int]] = {}
     next_radar = next_lidar = next_status = time.monotonic()
-    print(f"[fake-node] serving on UDP {port}; waiting for HELLO")
+    print(f"[fake-node] serving on UDP {port}; waiting for HELLO", flush=True)
     while True:
         now = time.monotonic()
         while True:

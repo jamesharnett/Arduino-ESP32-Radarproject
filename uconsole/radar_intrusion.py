@@ -153,6 +153,7 @@ class IntrusionDetector:
         self.match_radius_mm = match_radius_mm
         self.max_range_mm = max_range_mm
         self.armed = False
+        self.zones: List["IgnoreZone"] = []
         self.alerts: Dict[int, Alert] = {}
         self.events: List[Tuple[str, Alert]] = []     # ('start'|'end', alert), drained by the caller
         self._first_closer = [-1.0] * BUCKETS     # -1 = not currently 'closer'
@@ -185,6 +186,10 @@ class IntrusionDetector:
                     closer = d < ref.ref_mm[i] - self.delta_mm
                 elif ref.open[i]:
                     closer = d < self.max_range_mm
+                if closer and self.zones:
+                    a = (bucket_angle_deg(i) + self.lidar_offset_deg) % 360.0
+                    if any(z.contains(a, d) for z in self.zones):
+                        closer = False
             if closer:
                 if self._first_closer[i] < 0.0 or now - self._last_closer[i] > self.gap_s:
                     self._first_closer[i] = now
@@ -233,6 +238,8 @@ class IntrusionDetector:
         self.active_buckets = self._closer_buckets(now, lidar)
         blobs = [g for g in self._cluster(self.active_buckets, gap=2) if len(g) >= self.min_buckets]
         targets = [(slot, float(t.x_mm), float(t.y_mm)) for slot, t in radar.shown(now)]
+        if self.zones:
+            targets = [(slot, x, y) for slot, x, y in targets if not any(z.contains(*xy_to_polar(x, y)) for z in self.zones)]
 
         # geometry of every blob and the radar target (if any) moving inside it
         geoms = []
@@ -310,3 +317,245 @@ class IntrusionDetector:
 
     def active(self) -> List[Alert]:
         return sorted(self.alerts.values(), key=lambda a: a.since)
+
+
+# --------------------------------------------------------------- ignore zones
+@dataclass
+class IgnoreZone:
+    """A wedge (angles clockwise from forward, may wrap through 360) and range band to ignore."""
+    angle_from_deg: float
+    angle_to_deg: float
+    dist_min_mm: float = 0.0
+    dist_max_mm: float = 1e9
+
+    def contains(self, angle_deg: float, dist_mm: float) -> bool:
+        a, f, t = angle_deg % 360.0, self.angle_from_deg % 360.0, self.angle_to_deg % 360.0
+        in_angle = (f <= a <= t) if f <= t else (a >= f or a <= t)
+        return in_angle and self.dist_min_mm <= dist_mm <= self.dist_max_mm
+
+    @classmethod
+    def parse(cls, text: str) -> "IgnoreZone":
+        """``A1:A2`` or ``A1:A2:DMIN:DMAX`` with angles in degrees and distances in metres."""
+        parts = text.split(":")
+        if len(parts) not in (2, 4):
+            raise ValueError(f"ignore zone must be A1:A2 or A1:A2:DMIN:DMAX, got {text!r}")
+        a1, a2 = float(parts[0]), float(parts[1])
+        if len(parts) == 2:
+            return cls(a1, a2)
+        return cls(a1, a2, float(parts[2]) * 1000.0, float(parts[3]) * 1000.0)
+
+    def describe(self) -> str:
+        rng = "" if self.dist_max_mm >= 1e8 else f" {self.dist_min_mm / 1000:g}-{self.dist_max_mm / 1000:g} m"
+        return f"{self.angle_from_deg:g}-{self.angle_to_deg:g} deg{rng}"
+
+
+# --------------------------------------------------------------- arm schedule
+class ArmSchedule:
+    """Daily arming window ``HH:MM-HH:MM`` in local time; may wrap past midnight."""
+
+    def __init__(self, text: str) -> None:
+        try:
+            start, end = text.split("-")
+            sh, sm = (int(x) for x in start.split(":"))
+            eh, em = (int(x) for x in end.split(":"))
+        except ValueError as exc:
+            raise ValueError(f"arm schedule must be HH:MM-HH:MM, got {text!r}") from exc
+        if not (0 <= sh < 24 and 0 <= eh < 24 and 0 <= sm < 60 and 0 <= em < 60):
+            raise ValueError(f"arm schedule out of range: {text!r}")
+        self.start_min = sh * 60 + sm
+        self.end_min = eh * 60 + em
+        self.text = text
+        self._last: Optional[bool] = None
+
+    def active(self, when) -> bool:
+        m = when.hour * 60 + when.minute
+        if self.start_min <= self.end_min:
+            return self.start_min <= m < self.end_min
+        return m >= self.start_min or m < self.end_min
+
+    def poll(self, when) -> Optional[bool]:
+        """The new armed state when the window boundary was crossed since the last poll, else None."""
+        state = self.active(when)
+        if state != self._last:
+            self._last = state
+            return state
+        return None
+
+
+# ------------------------------------------------------------------ snapshot
+def snapshot(now: float, lidar: rs.LidarStore, radar: rs.RadarTracks, alert: Alert, lidar_offset_deg: float) -> dict:
+    """Everything needed to review an alert later: live buckets, radar targets, the alert."""
+    buckets = [[round(bucket_angle_deg(i) + lidar_offset_deg, 2), d, inten, round(age, 3)]
+               for i, d, inten, age in lidar.visible(now)]
+    targets = [{"slot": slot, "x_mm": t.x_mm, "y_mm": t.y_mm, "speed_cm_s": t.speed_cm_s} for slot, t in radar.shown(now)]
+    a = {k: v for k, v in alert.__dict__.items() if k != "buckets"}
+    a["buckets"] = list(alert.buckets)
+    return {"version": 1, "monotonic": now, "alert": a, "lidar": buckets, "radar": targets}
+
+
+# ------------------------------------------------------- detection runtime
+class DetectionRuntime:
+    """Everything the viewer and the headless relay share: baseline lifecycle,
+    arming (manual and scheduled), the detector, alert logging, snapshots and
+    the alert command. Audio and drawing stay with the caller."""
+
+    @staticmethod
+    def add_arguments(parser) -> None:
+        import argparse  # local import keeps this module importable without argparse users
+        g = parser.add_argument_group("intrusion detection")
+        g.add_argument("--baseline", default="baseline.json", metavar="FILE", help="empty-room reference scan to load/save ('' to disable)")
+        g.add_argument("--learn", type=float, default=0.0, metavar="S", help="learn the baseline for S seconds after data arrives, then arm")
+        g.add_argument("--armed", action="store_true", help="start armed (needs a baseline)")
+        g.add_argument("--arm-schedule", metavar="HH:MM-HH:MM", help="arm automatically inside this daily window (local time)")
+        g.add_argument("--ignore-zone", action="append", default=[], metavar="A1:A2[:DMIN:DMAX]",
+                       help="ignore changes in this wedge (degrees clockwise from forward, metres); repeatable")
+        g.add_argument("--alert-log", default="alerts.log", metavar="FILE", help="append alert start/end rows as CSV ('' to disable)")
+        g.add_argument("--alert-cmd", metavar="CMD", help="shell command run on each alert start; ALERT_KIND, ALERT_DIST_M, ALERT_ANGLE, ... in its environment")
+        g.add_argument("--snapshot-dir", metavar="DIR", help="write a JSON snapshot of the scene at every alert start")
+        g.add_argument("--delta-mm", type=int, default=300, help="a return must be this much closer than the baseline")
+        g.add_argument("--dwell-s", type=float, default=0.5, help="... for at least this long")
+        g.add_argument("--min-buckets", type=int, default=3, help="minimum width of a change in 0.5-degree buckets")
+
+    def __init__(self, args, lidar_offset_deg: float, log=print) -> None:
+        import os
+        self.args = args
+        self.log = log
+        self.lidar_offset_deg = lidar_offset_deg
+        self.ref = ReferenceScan()
+        if args.baseline and os.path.exists(args.baseline):
+            try:
+                self.ref = ReferenceScan.load(args.baseline)
+                self.log(f"[detect] baseline loaded from {args.baseline}: {sum(self.ref.reliable)} reliable, {sum(self.ref.open)} open buckets")
+            except (OSError, ValueError, KeyError) as exc:
+                self.log(f"[detect] could not load {args.baseline}: {exc}")
+        self.detector = IntrusionDetector(self.ref, lidar_offset_deg=lidar_offset_deg, delta_mm=args.delta_mm,
+                                          dwell_s=args.dwell_s, min_buckets=args.min_buckets)
+        self.detector.zones = [IgnoreZone.parse(z) for z in args.ignore_zone]
+        for z in self.detector.zones:
+            self.log(f"[detect] ignoring {z.describe()}")
+        self.schedule = ArmSchedule(args.arm_schedule) if args.arm_schedule else None
+        self.detector.armed = bool(args.armed and self.ref.has_baseline())
+        if args.armed and not self.ref.has_baseline():
+            self.log("[detect] --armed ignored: no baseline yet (use --learn or press B)")
+        self.learn_pending = args.learn if args.learn and args.learn > 0 else 0.0
+        self.learn_duration = 0.0
+        self.arm_after_learn = False
+        self.alert_log = None
+        if args.alert_log:
+            new = not os.path.exists(args.alert_log) or os.path.getsize(args.alert_log) == 0
+            self.alert_log = open(args.alert_log, "a")
+            if new:
+                self.alert_log.write("time,event,id,kind,angle_deg,dist_m,x_m,y_m,span_deg,confidence\n")
+        if args.snapshot_dir:
+            os.makedirs(args.snapshot_dir, exist_ok=True)
+        self.last_schedule_check = 0.0
+        self.events_seen = 0
+
+    # -- lifecycle -------------------------------------------------------------
+    @property
+    def armed(self) -> bool:
+        return self.detector.armed
+
+    def set_armed(self, state: bool) -> bool:
+        if state and not self.ref.has_baseline():
+            self.log("[detect] cannot arm: no baseline yet (learn one first)")
+            return False
+        self.detector.armed = state
+        self.log(f"[detect] {'ARMED' if state else 'disarmed'}")
+        return True
+
+    def toggle_armed(self) -> None:
+        self.set_armed(not self.detector.armed)
+
+    def start_learning(self, now: float, seconds: float, arm_after: bool) -> None:
+        if self.ref.learning():
+            return
+        self.ref.start(now)
+        self.learn_duration = seconds
+        self.arm_after_learn = arm_after
+        self.log(f"[detect] learning the empty room for {seconds:g} s - keep it empty")
+
+    def learning_left(self, now: float) -> Optional[float]:
+        if not self.ref.learning() or self.ref.learning_since is None:
+            return None
+        return max(0.0, self.learn_duration - (now - self.ref.learning_since))
+
+    def on_lidar_packet(self, pkt: rp.LidarPacket) -> None:
+        if self.ref.learning():
+            self.ref.feed(pkt)
+
+    def tick(self, now: float, data_alive: bool, lidar: rs.LidarStore, radar: rs.RadarTracks) -> List[Tuple[str, Alert]]:
+        """Advance learning, scheduling and detection; returns the alert events of this tick."""
+        import datetime
+        if self.learn_pending and data_alive:
+            self.start_learning(now, self.learn_pending, arm_after=True)
+            self.learn_pending = 0.0
+        if self.ref.learning() and self.ref.learning_since is not None and now - self.ref.learning_since >= self.learn_duration:
+            n = self.ref.finish(now)
+            self.log(f"[detect] baseline learned: {n} reliable, {sum(self.ref.open)} open buckets")
+            if self.args.baseline:
+                try:
+                    self.ref.save(self.args.baseline)
+                    self.log(f"[detect] baseline saved to {self.args.baseline}")
+                except OSError as exc:
+                    self.log(f"[detect] could not save baseline: {exc}")
+            if self.arm_after_learn or (self.schedule is not None and self.schedule.active(datetime.datetime.now())):
+                self.set_armed(True)          # a schedule that wanted to arm before the baseline existed
+        if self.schedule is not None and now - self.last_schedule_check >= 1.0:
+            self.last_schedule_check = now
+            change = self.schedule.poll(datetime.datetime.now())
+            if change is not None and change != self.detector.armed:
+                self.log(f"[detect] schedule {self.schedule.text}: {'arming' if change else 'disarming'}")
+                self.set_armed(change)
+        self.detector.update(now, lidar, radar)
+        events = self.detector.drain_events()
+        for event, alert in events:
+            self.on_alert_event(event, alert, now, lidar, radar)
+        return events
+
+    def on_alert_event(self, event: str, a: Alert, now: float, lidar: rs.LidarStore, radar: rs.RadarTracks) -> None:
+        import datetime
+        import json as _json
+        import os
+        import subprocess
+        self.events_seen += 1
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        self.log(f"[alert] {event.upper()} #{a.id} {a.describe()}")
+        if self.alert_log is not None:
+            self.alert_log.write(f"{stamp},{event},{a.id},{a.kind},{a.angle_deg:.1f},{a.dist_mm / 1000:.2f},"
+                                 f"{a.x_mm / 1000:.2f},{a.y_mm / 1000:.2f},{a.span_deg:.1f},{a.confidence:.2f}\n")
+            self.alert_log.flush()
+        if event != "start":
+            return
+        if self.args.snapshot_dir:
+            path = os.path.join(self.args.snapshot_dir, f"alert-{stamp.replace(':', '')}-{a.id}.json")
+            try:
+                with open(path, "w") as fh:
+                    _json.dump(snapshot(now, lidar, radar, a, self.lidar_offset_deg), fh)
+            except OSError as exc:
+                self.log(f"[alert] snapshot failed: {exc}")
+        if self.args.alert_cmd:
+            env = dict(os.environ, ALERT_EVENT=event, ALERT_ID=str(a.id), ALERT_KIND=a.kind,
+                       ALERT_ANGLE=f"{a.angle_deg:.1f}", ALERT_DIST_M=f"{a.dist_mm / 1000:.2f}",
+                       ALERT_X_M=f"{a.x_mm / 1000:.2f}", ALERT_Y_M=f"{a.y_mm / 1000:.2f}",
+                       ALERT_CONF=f"{a.confidence:.2f}")
+            try:
+                subprocess.Popen(self.args.alert_cmd, shell=True, env=env)
+            except OSError as exc:
+                self.log(f"[alert] command failed: {exc}")
+
+    def status_text(self, now: float) -> Tuple[str, str]:
+        """(text, level) for a HUD line; level is 'warn', 'alert' or 'dim'."""
+        left = self.learning_left(now)
+        if left is not None:
+            return f"LEARNING BASELINE {left:4.1f}s  keep the room empty", "warn"
+        if self.ref.has_baseline():
+            sched = f"  schedule {self.schedule.text}" if self.schedule else ""
+            return (f"{'ARMED' if self.detector.armed else 'disarmed'}  baseline {sum(self.ref.reliable)} buckets{sched}",
+                    "alert" if self.detector.armed else "dim")
+        return "no baseline: press B with the room empty", "dim"
+
+    def close(self) -> None:
+        if self.alert_log is not None:
+            self.alert_log.close()
+            self.alert_log = None
