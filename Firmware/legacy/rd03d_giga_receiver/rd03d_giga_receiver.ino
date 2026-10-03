@@ -10,7 +10,7 @@
  */
 
 #include <WiFi.h>
-#include <WiFiUDP.h>
+#include <WiFiUdp.h>   // header name as shipped by the Mbed core (was WiFiUDP.h: failed on Linux)
 #include "Arduino_GigaDisplay_GFX.h"
 #include "Arduino_GigaDisplayTouch.h"
 
