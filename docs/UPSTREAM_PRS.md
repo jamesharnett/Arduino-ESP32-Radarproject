@@ -12,7 +12,7 @@ The branches are based on `main`, which is identical to the upstream `main`
 | `fix/wifiudp-include-case` | `Stevee87/Arduino-ESP32-Radarproject` | receiver `.ino` | `#include <WiFiUDP.h>` → `<WiFiUdp.h>`; the sketch did not compile on Linux |
 | `fix/giga-receiver-robustness` | `Stevee87/Arduino-ESP32-Radarproject` | receiver `.ino` | check `WiFi.beginAP()` and show the failure on screen; drain all queued UDP datagrams per loop instead of one; `fb[12]` overflow → `fb[16]`; "R4" labels renamed |
 | `fix/xiao-transmitter-nonblocking` | `Stevee87/Arduino-ESP32-Radarproject` | transmitter `.ino` | non-blocking Wi-Fi connect with retry instead of a 20 s block and `ESP.restart()`; the 650 ms radar re-configuration every 60 s turned into a timed step sequence; clustering keeps the speed with the larger magnitude |
-| `fix/radar-project-uconsole-struct-format` | `Stevee87/Radar-project-Uconsole` | `upstream-patches/…/0001-*.patch` | the Python receiver unpacked 29 of the 32 packet bytes and corrupted targets 2 and 3; shipped as a `git am` patch with instructions because this fork has no fork of that repository |
+| `fix/receiver-packet-format` in `jamesharnett/Radar-project-Uconsole` | `Stevee87/Radar-project-Uconsole` | `Firmware/uconsole_radar_receiver.py` | the Python receiver unpacked 29 of the 32 packet bytes and corrupted targets 2 and 3 (`"hhhB"` → `"hhhBx"` per target). The same change also exists as a `git am` patch on this fork's `fix/radar-project-uconsole-struct-format` branch, which is now redundant |
 
 Each code branch was compiled for its board (esp32 core 2.0.9 for the XIAO, whose
 APIs used here are unchanged in 3.x; Arduino Mbed OS GIGA Boards 4.6.0 for the GIGA)
@@ -26,6 +26,6 @@ From the fork on GitHub: *Pull requests → New → compare across forks*, base
 `Stevee87/Arduino-ESP32-Radarproject:main`, head `<fork>:<branch>`. The commit
 message of each branch is written to serve as the PR description.
 
-For the `Radar-project-Uconsole` fix, fork that repository first and follow
-`upstream-patches/Radar-project-Uconsole/README.md` on the
-`fix/radar-project-uconsole-struct-format` branch.
+For the `Radar-project-Uconsole` fix, open the pull request from
+`jamesharnett/Radar-project-Uconsole:fix/receiver-packet-format` against
+`Stevee87/Radar-project-Uconsole:main`.
