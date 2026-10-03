@@ -25,6 +25,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <esp_wifi.h>
+#include <esp_arduino_version.h>
 
 #include "config.h"
 #include "radar_protocol.h"
@@ -150,7 +151,11 @@ static void pollHello(uint32_t now) {
          * 3.x) parsePacket() returns 0 for as long as a partially read datagram
          * sits in its buffer, so without this one stray oversized packet would
          * silence HELLO reception until the next power cycle. */
-        udp.flush();
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+        udp.clear();
+#else
+        udp.flush();                              /* 2.x name of the same call */
+#endif
         if (n <= 0) continue;
         uint8_t type; uint16_t seq;
         if (!rl_read_header(buf, (size_t)n, &type, &seq)) continue;
