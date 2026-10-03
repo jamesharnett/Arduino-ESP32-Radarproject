@@ -14,3 +14,7 @@ build/
 *.hex
 .vscode/
 .idea/
+
+# RadarLink runtime files (uConsole viewer)
+baseline.json
+alerts.log

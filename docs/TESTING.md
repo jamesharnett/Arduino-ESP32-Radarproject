@@ -146,6 +146,42 @@ Walk away along the centre line. Targets should track to 6–8 m indoors. Loss
 before 5 m usually means the module faces plastic thicker than 2 mm, a metal
 object within 20 cm, or supply ripple.
 
+## 7. Intrusion detection
+
+Bench first, with the simulator (one terminal each):
+
+```bash
+python3 fake_sensor_node.py --quiet-room --intruder-after 20 --intruder-stay 15
+python3 radar_viewer.py --node 127.0.0.1 --windowed --learn 10 --baseline /tmp/b.json --alert-log /tmp/a.log
+```
+
+Expected: `[detect] learning ...` for 10 s, `baseline learned: ~680 reliable, ~40 open`,
+`[detect] ARMED`, then at about 20 s `[alert] START #1 radar ...` as the walker
+enters the doorway, upgraded to `fused ... conf 0.95` within a second as the
+LIDAR confirms the body, and `[alert] END #1` a second after the walker leaves.
+One person should produce one alert id; `/tmp/a.log` holds the CSV rows.
+
+On hardware:
+
+1. Leave the room, or stand still well outside the LIDAR's view, and press `B`
+   (or start with `--learn 10`). Learning takes 10 s; the HUD counts down.
+2. The HUD then shows `disarmed  baseline N buckets`. N should be close to the
+   number of directions with a wall or furniture in range; a value under ~300
+   means the LIDAR saw mostly nothing (range, glass, black walls) and the
+   detector will only have the radar to work with.
+3. Press `A`. Walk in: expect `radar` within a second of moving in the radar
+   sector, `fused` once you are inside the LIDAR's view for half a second, red
+   arc on the body, siren unless muted.
+4. Place a box and leave: a `lidar` alert appears after 0.5 s and stays until
+   the box is removed (plus a 1 s hold).
+5. False alarms: a curtain or plant moving in a draught shows as flickering
+   `lidar` alerts in one direction. Raise `--delta-mm` (default 300) or
+   `--dwell-s` (default 0.5), or re-learn the baseline with the window closed.
+   Pets below the LIDAR plane are invisible to it but may trigger `radar`.
+
+The baseline is saved to `baseline.json` in the working directory and loaded on
+the next start; re-learn after moving furniture.
+
 ## Recording a session
 
 ```bash

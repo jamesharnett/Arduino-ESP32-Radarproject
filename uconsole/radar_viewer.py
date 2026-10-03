@@ -7,7 +7,13 @@ HELLO to the sensor node once a second and draws the LIDAR room outline and the
 radar's moving targets, with optional sonar-style audio.
 
 Keys: ESC/Q quit · UP/DOWN or +/- zoom · M mute · L lidar on/off · F fullscreen
+      A arm/disarm intrusion detection · B learn the empty-room baseline (10 s)
       SPACE pause (replay) · R start/stop recording
+
+Intrusion detection (see docs/TESTING.md): learn a baseline of the empty room
+once (B, or --learn 10 at start), arm (A, or --armed), and every LIDAR change
+that persists, every radar motion, or both together becomes an alert: drawn in
+red, sounded, appended to --alert-log and optionally handed to --alert-cmd.
 
 Examples:
     python3 radar_viewer.py                          # fullscreen, node at 192.168.4.1
@@ -18,9 +24,11 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import datetime
 import math
 import os
 import socket
+import subprocess
 import sys
 import time
 from typing import List, Optional, Tuple
@@ -28,6 +36,7 @@ from typing import List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import radar_protocol as rp  # noqa: E402
 import radar_state as rs     # noqa: E402
+import radar_intrusion as ri # noqa: E402
 
 # ------------------------------------------------------------------ defaults
 DEFAULT_NODE = "192.168.4.1"     # fixed by the sensor node's softAPConfig(); use --node gateway to auto-detect
@@ -45,6 +54,8 @@ BEEP = dict(dist_min=300.0, dist_max=8000.0, interval_min=0.12, interval_max=0.9
 SLOT_COLOURS = [(255, 70, 70), (255, 180, 0), (0, 230, 255)]
 C_BG, C_GRID, C_GRID_DIM, C_SECTOR = (6, 10, 6), (0, 95, 0), (0, 50, 0), (0, 110, 30)
 C_TEXT, C_DIM, C_OK, C_BAD, C_WARN = (230, 255, 230), (110, 150, 110), (80, 255, 80), (255, 80, 80), (255, 190, 0)
+C_ALERT = (255, 40, 40)
+LEARN_SECONDS = 10.0
 
 
 def default_gateway() -> Optional[str]:
@@ -97,6 +108,14 @@ class Sonar:
             self.cache[key] = snd
         return snd
 
+    def siren(self, now: float, muted: bool) -> None:
+        """Insistent two-tone alarm while an intrusion alert is active."""
+        if not self.ok or muted:
+            return
+        if now - self.last_ping >= 0.25:
+            self.last_ping = now
+            self._sound(880.0 if int(now * 4) % 2 else 660.0).play()
+
     def update(self, now: float, closest_mm: Optional[float], muted: bool) -> None:
         if not self.ok or muted or closest_mm is None:
             return
@@ -145,6 +164,30 @@ class Viewer:
         self.bucket_trig = [(math.sin(math.radians(sign * ((i + 0.5) * 360.0 / rs.BUCKETS + offset))),
                              math.cos(math.radians(sign * ((i + 0.5) * 360.0 / rs.BUCKETS + offset))))
                             for i in range(rs.BUCKETS)]
+
+        # intrusion detection
+        self.ref = ri.ReferenceScan()
+        if args.baseline and os.path.exists(args.baseline):
+            try:
+                self.ref = ri.ReferenceScan.load(args.baseline)
+                print(f"[detect] baseline loaded from {args.baseline}: {sum(self.ref.reliable)} reliable, "
+                      f"{sum(self.ref.open)} open buckets")
+            except (OSError, ValueError, KeyError) as exc:
+                print(f"[detect] could not load {args.baseline}: {exc}")
+        self.detector = ri.IntrusionDetector(self.ref, lidar_offset_deg=sign * offset, delta_mm=args.delta_mm,
+                                             dwell_s=args.dwell_s, min_buckets=args.min_buckets)
+        self.detector.armed = bool(args.armed and self.ref.has_baseline())
+        if args.armed and not self.ref.has_baseline():
+            print("[detect] --armed ignored: no baseline yet (use --learn or press B)")
+        self.learn_pending = args.learn if args.learn and args.learn > 0 else 0.0
+        self.learn_duration = 0.0
+        self.arm_after_learn = False
+        self.alert_log = None
+        if args.alert_log:
+            new = not os.path.exists(args.alert_log) or os.path.getsize(args.alert_log) == 0
+            self.alert_log = open(args.alert_log, "a")
+            if new:
+                self.alert_log.write("time,event,id,kind,angle_deg,dist_m,x_m,y_m,span_deg,confidence\n")
 
         if args.replay:
             self.replay = rs.Replayer(open(args.replay, "rb"), speed=args.speed, loop=args.loop)
@@ -234,8 +277,58 @@ class Viewer:
             self.radar.update(pkt, now)
         elif ptype == rp.TYPE_LIDAR:
             self.lidar.update(pkt, now)
+            if self.ref.learning():
+                self.ref.feed(pkt)
         elif ptype == rp.TYPE_STATUS:
             self.status, self.status_at = pkt, now
+
+    # ------------------------------------------------------- intrusion
+    def start_learning(self, now: float, seconds: float, arm_after: bool) -> None:
+        if self.ref.learning():
+            return
+        self.ref.start(now)
+        self.learn_duration = seconds
+        self.arm_after_learn = arm_after
+        print(f"[detect] learning the empty room for {seconds:g} s - keep it empty")
+
+    def tick_detection(self, now: float) -> None:
+        if self.learn_pending and self.alive(now):
+            self.start_learning(now, self.learn_pending, arm_after=True)
+            self.learn_pending = 0.0
+        if self.ref.learning() and self.ref.learning_since is not None and now - self.ref.learning_since >= self.learn_duration:
+            n = self.ref.finish(now)
+            print(f"[detect] baseline learned: {n} reliable, {sum(self.ref.open)} open buckets")
+            if self.args.baseline:
+                try:
+                    self.ref.save(self.args.baseline)
+                    print(f"[detect] baseline saved to {self.args.baseline}")
+                except OSError as exc:
+                    print(f"[detect] could not save baseline: {exc}")
+            if self.arm_after_learn:
+                self.detector.armed = True
+                print("[detect] ARMED")
+        self.detector.update(now, self.lidar, self.radar)
+        for event, alert in self.detector.drain_events():
+            self.on_alert_event(event, alert)
+        if self.detector.armed and self.detector.alerts:
+            self.sonar.siren(now, self.muted)
+
+    def on_alert_event(self, event: str, a: ri.Alert) -> None:
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        print(f"[alert] {event.upper()} #{a.id} {a.describe()}")
+        if self.alert_log is not None:
+            self.alert_log.write(f"{stamp},{event},{a.id},{a.kind},{a.angle_deg:.1f},{a.dist_mm / 1000:.2f},"
+                                 f"{a.x_mm / 1000:.2f},{a.y_mm / 1000:.2f},{a.span_deg:.1f},{a.confidence:.2f}\n")
+            self.alert_log.flush()
+        if event == "start" and self.args.alert_cmd:
+            env = dict(os.environ, ALERT_EVENT=event, ALERT_ID=str(a.id), ALERT_KIND=a.kind,
+                       ALERT_ANGLE=f"{a.angle_deg:.1f}", ALERT_DIST_M=f"{a.dist_mm / 1000:.2f}",
+                       ALERT_X_M=f"{a.x_mm / 1000:.2f}", ALERT_Y_M=f"{a.y_mm / 1000:.2f}",
+                       ALERT_CONF=f"{a.confidence:.2f}")
+            try:
+                subprocess.Popen(self.args.alert_cmd, shell=True, env=env)
+            except OSError as exc:
+                print(f"[alert] command failed: {exc}")
 
     # ------------------------------------------------------------ drawing
     def alive(self, now: float) -> bool:
@@ -291,6 +384,28 @@ class Viewer:
             label = self.font.render(f"{t.distance_mm / 1000:.2f}m {abs(t.speed_cm_s)}cm/s", True, C_TEXT)
             scr.blit(label, (x + 26, y - label.get_height() // 2))
 
+    def draw_alerts(self, now: float) -> None:
+        if not self.detector.armed:
+            return
+        pg, scr = self.pygame, self.screen
+        k = self.px_per_mm()
+        for a in self.detector.active():
+            if a.buckets:
+                pts = []
+                for b in a.buckets:
+                    r = self.lidar.dist[b] * k
+                    if r > self.plot_r:
+                        continue
+                    s_, c_ = self.bucket_trig[b]
+                    pts.append((self.cx + r * s_, self.cy - r * c_))
+                if len(pts) >= 2:
+                    pg.draw.lines(scr, C_ALERT, False, pts, 4)
+            x = int(self.cx + a.x_mm * k)
+            y = int(self.cy - a.y_mm * k)
+            pg.draw.circle(scr, C_ALERT, (x, y), 28, 3)
+            label = self.font.render(f"ALERT {a.kind} {a.dist_mm / 1000:.1f}m", True, C_ALERT)
+            scr.blit(label, (x - label.get_width() // 2, y - 28 - label.get_height() - 2))
+
     def draw_hud(self, now: float) -> None:
         scr, f = self.screen, self.font
         lh = f.get_height() + 2
@@ -317,6 +432,18 @@ class Viewer:
                       f"sound {'muted' if self.muted else ('on' if self.sonar.ok else 'n/a')}", C_DIM))
         if self.recorder is not None:
             lines.append((f"REC {self.recorder.count} datagrams", C_BAD))
+        if self.ref.learning() and self.ref.learning_since is not None:
+            left = max(0.0, self.learn_duration - (now - self.ref.learning_since))
+            lines.append((f"LEARNING BASELINE {left:4.1f}s  keep the room empty", C_WARN))
+        elif self.ref.has_baseline():
+            age = now - self.ref.learned_at if self.ref.learned_at <= now else 0.0
+            lines.append((f"{'ARMED' if self.detector.armed else 'disarmed'}  baseline {sum(self.ref.reliable)} buckets"
+                          + (f", {age / 60:.0f} min old" if age < 86400 else ""),
+                          C_BAD if self.detector.armed else C_DIM))
+        else:
+            lines.append(("no baseline: press B with the room empty", C_DIM))
+        for a in self.detector.active() if self.detector.armed else []:
+            lines.append((f"ALERT #{a.id} {a.describe()}", C_ALERT))
         scr.blit(self.font_big.render("RadarLink", True, C_OK), (8, 6))
         y = 8 + self.font_big.get_height() + 4
         for text, col in lines:
@@ -327,7 +454,7 @@ class Viewer:
         for slot, t in self.radar.shown(now):
             scr.blit(f.render(f"T{slot + 1} {t.distance_mm / 1000:.2f}m {abs(t.speed_cm_s)}cm/s", True, SLOT_COLOURS[slot]), (8, y))
             y += lh
-        help_text = "ESC quit  UP/DOWN zoom  M mute  L lidar  F fullscreen" + ("  R record" if self.replay is None else "  SPACE pause")
+        help_text = "ESC quit  UP/DOWN zoom  M mute  L lidar  A arm  B learn  F fullscreen" + ("  R record" if self.replay is None else "  SPACE pause")
         hs = f.render(help_text, True, C_DIM)
         scr.blit(hs, (self.w - hs.get_width() - 8, self.h - lh - 4))
         if not ok:
@@ -339,6 +466,7 @@ class Viewer:
         self.draw_grid()
         self.draw_lidar(now)
         self.draw_targets(now)
+        self.draw_alerts(now)
         self.draw_hud(now)
         self.pygame.display.flip()
         self.frames += 1
@@ -364,6 +492,14 @@ class Viewer:
                 self.lidar_visible = not self.lidar_visible
             elif ev.key == pg.K_f:
                 pg.display.toggle_fullscreen()
+            elif ev.key == pg.K_a:
+                if self.ref.has_baseline():
+                    self.detector.armed = not self.detector.armed
+                    print(f"[detect] {'ARMED' if self.detector.armed else 'disarmed'}")
+                else:
+                    print("[detect] no baseline yet: press B with the room empty")
+            elif ev.key == pg.K_b:
+                self.start_learning(time.monotonic(), LEARN_SECONDS, arm_after=self.detector.armed)
             elif ev.key == pg.K_SPACE and self.replay is not None:
                 self.paused = not self.paused
             elif ev.key == pg.K_r and self.replay is None:
@@ -386,6 +522,7 @@ class Viewer:
             running = self.handle_events()
             self.send_hello(now)
             self.poll_network(now)
+            self.tick_detection(now)
             self.sonar.update(now, self.radar.closest_mm(now), self.muted)
             self.render(now)
             if now - self.last_sec >= 1.0:
@@ -405,6 +542,8 @@ class Viewer:
             self.clock.tick(self.args.fps)
         if self.recorder is not None:
             self.recorder.close()
+        if self.alert_log is not None:
+            self.alert_log.close()
         self.pygame.quit()
         return 0
 
@@ -426,6 +565,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--replay", metavar="FILE", help="replay a recording instead of listening")
     p.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
     p.add_argument("--loop", action="store_true", help="loop the replay")
+    g = p.add_argument_group("intrusion detection")
+    g.add_argument("--baseline", default="baseline.json", metavar="FILE", help="empty-room reference scan to load/save ('' to disable)")
+    g.add_argument("--learn", type=float, default=0.0, metavar="S", help="learn the baseline for S seconds after data arrives, then arm")
+    g.add_argument("--armed", action="store_true", help="start armed (needs a baseline)")
+    g.add_argument("--alert-log", default="alerts.log", metavar="FILE", help="append alert start/end rows as CSV ('' to disable)")
+    g.add_argument("--alert-cmd", metavar="CMD", help="shell command run on each alert start; ALERT_KIND, ALERT_DIST_M, ALERT_ANGLE, ... in its environment")
+    g.add_argument("--delta-mm", type=int, default=300, help="a return must be this much closer than the baseline")
+    g.add_argument("--dwell-s", type=float, default=0.5, help="... for at least this long")
+    g.add_argument("--min-buckets", type=int, default=3, help="minimum width of a change in 0.5-degree buckets")
     p.add_argument("--max-frames", type=int, default=0, help="exit after N frames (testing)")
     p.add_argument("--exit-on-replay-end", action="store_true", help="exit when the replay finishes")
     p.add_argument("--replay-silent", action="store_true", help=argparse.SUPPRESS)

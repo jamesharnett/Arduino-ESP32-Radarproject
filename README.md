@@ -280,9 +280,38 @@ python3 radar_viewer.py                              # fullscreen; ESC quits
 ```
 
 Keys: `UP/DOWN` zoom (2/4/8/12 m), `M` mute, `L` LIDAR on/off, `F` fullscreen,
+`A` arm/disarm intrusion detection, `B` learn the empty-room baseline (10 s),
 `R` record raw datagrams to a `.rdl` file. `--windowed`, `--no-audio`,
 `--node IP` and `--offset DEG` are the useful options; `--help` lists the rest.
 To start it at boot, see `uconsole/radar-viewer.service`.
+
+### 4. Intrusion detection (uConsole)
+
+The viewer turns the room outline into an alarm. With the room empty, learn a
+**baseline** (press `B`, or start with `--learn 10`): the median LIDAR distance
+per 0.5° bucket, with flickering buckets excluded and open directions (a long
+corridor beyond range) remembered as open. Then **arm** (`A`, or `--armed`).
+While armed, three things raise an alert:
+
+| Alert kind | Trigger | Confidence |
+|---|---|---|
+| `fused` | LIDAR returns at least 30 cm closer than the baseline over ≥ 1.5° for ≥ 0.5 s **and** a moving radar target within 0.9 m of them | 0.95 |
+| `lidar` | the same LIDAR change without radar motion: something was placed or someone is holding still | 0.6–0.7 |
+| `radar` | a moving radar target with no LIDAR change: motion behind a thin door or beyond the LIDAR's range | 0.5 |
+
+Alerts are drawn in red on the plot, listed in the HUD, sounded as a two-tone
+siren (unless muted), appended to `alerts.log` as CSV and, with
+`--alert-cmd`, handed to a shell command on each start, for example
+
+```bash
+python3 radar_viewer.py --armed --alert-cmd 'curl -s -d "RadarLink: $ALERT_KIND $ALERT_DIST_M m at $ALERT_ANGLE deg" ntfy.sh/your-topic'
+```
+
+`ALERT_KIND`, `ALERT_DIST_M`, `ALERT_ANGLE`, `ALERT_X_M`, `ALERT_Y_M`,
+`ALERT_CONF` and `ALERT_ID` are in the command's environment. Tune with
+`--delta-mm`, `--dwell-s` and `--min-buckets`; re-learn the baseline whenever
+furniture moves. The detector lives in `uconsole/radar_intrusion.py` and is
+unit tested without hardware.
 
 ### Testing without hardware
 
@@ -292,6 +321,8 @@ python3 fake_sensor_node.py &                        # simulated node on UDP 421
 python3 radar_viewer.py --node 127.0.0.1 --windowed  # draws a 6 x 4 m room and two walkers
 python3 fake_sensor_node.py --write demo.rdl --seconds 20   # or write a recording
 python3 radar_viewer.py --replay demo.rdl --windowed --loop
+python3 fake_sensor_node.py --quiet-room --intruder-after 15 &          # empty room, then an intruder
+python3 radar_viewer.py --node 127.0.0.1 --windowed --learn 8         # learns, arms, alerts at ~15 s
 python3 -m unittest discover -s tests                # protocol + state tests
 g++ -std=c++11 -Wall -Wextra -Werror -I ../Firmware/sensor_node_esp32s3 ../Firmware/tests/host/test_parsers.cpp -o /tmp/t && /tmp/t
 ```
@@ -380,10 +411,9 @@ in your slicer before printing: the board is 101.5 mm long inside a 105 mm body.
 ## Roadmap
 
 1. **Level 2 enclosure** for the LD19 and a ≥ 3000 mAh cell.
-2. **Intrusion logic on the uConsole:** store a reference LIDAR scan of the empty
-   room per 0.5° bucket and flag buckets that get closer for more than half a
-   second, fused with radar motion to suppress false alarms. The uConsole has the
-   CPU and storage; the viewer already keeps the bucket store this needs.
+2. ~~Intrusion logic on the uConsole~~ — done, see *Intrusion detection* above.
+   Open items: per-zone arming (ignore a pet corridor), scheduled arming, and
+   persistence of alert history beyond the CSV log.
 3. **Off-site viewing:** the uConsole's 4G module plus Tailscale (or an MQTT
    relay) forwarding the UDP stream to a phone or laptop. The radio layer on the
    ESP32 stays as it is.
