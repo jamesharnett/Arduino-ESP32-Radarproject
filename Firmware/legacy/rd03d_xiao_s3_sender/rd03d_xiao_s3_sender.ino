@@ -1,7 +1,7 @@
 /*
  * RD-03D Radar — XIAO ESP32-S3 (Single-Sensor, horizontal vor dem Display)
  * Liest Radar-Frames, verschmilzt Targets < 1m (Clustering) und sendet
- * per UDP an Giga R1.
+ * per UDP an den Giga R1 (der den Hotspot hostet).
  *
  * PINBELEGUNG:
  *   Radar TX → D0 (GPIO1)  = UART1 RX
@@ -12,11 +12,14 @@
  * HINWEIS: D6/D7 (GPIO43/44) NICHT verwenden — das ist USB-Serial (UART0)
  *
  * NETZWERK:
- *   Verbindet sich mit Hotspot des Giga R1
+ *   XIAO verbindet sich als Client mit dem Hotspot des Giga R1
  *   SSID:    "RadarNet"
  *   Passwort: "radar12345"
  *   UDP Port: 4210
  *   Giga-IP wird automatisch aus DHCP-Gateway geholt
+ *
+ * Einschaltreihenfolge beliebig: Ohne Hotspot läuft das Radar weiter;
+ * der XIAO versucht die WLAN-Verbindung alle 10 Sekunden erneut.
  */
 
 #include <WiFi.h>
@@ -55,6 +58,7 @@ struct __attribute__((packed)) UdpPacket {
 
 HardwareSerial RadarSerial(1);
 WiFiUDP        udp;
+bool           wifiReady = false;
 UdpPacket      pkt;
 uint32_t       frameCount = 0;
 uint32_t       badCount   = 0;
@@ -83,7 +87,10 @@ void clusterTargets() {
       if (dist < CLUSTER_DIST_MM) {
         pkt.targets[i].x   = (int16_t)(((float)pkt.targets[i].x + (float)pkt.targets[j].x) / 2.0f);
         pkt.targets[i].y   = (int16_t)(((float)pkt.targets[i].y + (float)pkt.targets[j].y) / 2.0f);
-        pkt.targets[i].spd = max(pkt.targets[i].spd, pkt.targets[j].spd);
+        // Geschwindigkeit mit dem größeren Betrag behalten (Vorzeichen = Richtung).
+        // max() auf den vorzeichenbehafteten Werten wählte bei zwei sich nähernden
+        // Echos (z.B. -50 und -10 cm/s) die langsamere Komponente.
+        if (abs(pkt.targets[j].spd) > abs(pkt.targets[i].spd)) pkt.targets[i].spd = pkt.targets[j].spd;
         pkt.targets[j] = {0, 0, 0, 0};
       }
     }
@@ -111,6 +118,7 @@ void parseAndSend(const uint8_t *pl) {
   clusterTargets();
 
   pkt.frameCount = ++frameCount;
+  if (!wifiReady) return;   // noch kein Netz: Radar trotzdem weiterlesen, nur nicht senden
   int r1 = udp.beginPacket(gigaIP, UDP_PORT);
   udp.write((uint8_t*)&pkt, sizeof(pkt));
   int r2 = udp.endPacket();
@@ -128,8 +136,13 @@ void parseAndSend(const uint8_t *pl) {
 uint8_t pl[26];
 uint8_t plIdx = 0, hdrIdx = 0;
 bool    inFrame = false;
+uint8_t cmdStep = 0;   // Multi-Target-Kommandokette aktiv? (siehe unten)
 
 void readRadar() {
+  if (cmdStep) {   // während der Konfiguration kommen Antwortframes, keine Messwerte
+    while (RadarSerial.available()) RadarSerial.read();
+    return;
+  }
   while (RadarSerial.available()) {
     uint8_t c = RadarSerial.read();
     byteCount++;
@@ -154,39 +167,63 @@ void readRadar() {
   }
 }
 
-// ── Multi-Target CMD ──
-void sendMultiTargetCmd() {
-  while (RadarSerial.available()) RadarSerial.read();
-  delay(50);
-  RadarSerial.write(CMD_ENABLE, sizeof(CMD_ENABLE));
-  RadarSerial.flush(); delay(200);
-  while (RadarSerial.available()) RadarSerial.read();
-  RadarSerial.write(CMD_MULTI, sizeof(CMD_MULTI));
-  RadarSerial.flush(); delay(200);
-  while (RadarSerial.available()) RadarSerial.read();
-  RadarSerial.write(CMD_END, sizeof(CMD_END));
-  RadarSerial.flush(); delay(200);
-  while (RadarSerial.available()) RadarSerial.read();
-  Serial.println("Multi-Target CMD gesendet.");
+// ── Multi-Target CMD (nicht blockierend) ──
+// Schrittkette mit 200 ms Abstand: loop() läuft während der Konfiguration weiter.
+// readRadar() verwirft dabei UART-Daten; Messwerte pausieren weiterhin ca. 600 ms.
+// Nach CMD_END wird der Parser neu synchronisiert.
+uint32_t cmdStepMs = 0;
+
+void startMultiTargetCmd() {
+  if (cmdStep) return;
+  cmdStep   = 1;
+  cmdStepMs = millis() - 200;   // erster Schritt sofort fällig
 }
 
-// ── WiFi verbinden ──
+void runMultiTargetCmd() {
+  if (cmdStep == 0 || millis() - cmdStepMs < 200) return;
+  while (RadarSerial.available()) RadarSerial.read();   // Antworten des Moduls verwerfen
+  switch (cmdStep) {
+    case 1: RadarSerial.write(CMD_ENABLE, sizeof(CMD_ENABLE)); break;
+    case 2: RadarSerial.write(CMD_MULTI,  sizeof(CMD_MULTI));  break;
+    case 3: RadarSerial.write(CMD_END,    sizeof(CMD_END));    break;
+    default:
+      inFrame = false; plIdx = 0; hdrIdx = 0;   // Parser neu synchronisieren
+      Serial.println("Multi-Target CMD gesendet.");
+      cmdStep = 0;
+      return;
+  }
+  cmdStepMs = millis();
+  cmdStep++;
+}
+
+// ── WiFi verbinden (nicht blockierend) ──
+// Vorher blockierte connectWiFi() bis zu 20 s und rief danach ESP.restart()
+// auf: ohne erreichbaren Giga lief der XIAO in einer Neustart-Schleife und las
+// währenddessen kein Radar. Jetzt verbindet er im Hintergrund, versucht es alle
+// 10 s erneut. Außerhalb der Radar-Konfiguration liest readRadar() weiter.
+bool     udpStarted       = false;
+uint32_t lastConnectTryMs = 0;
+
 void connectWiFi() {
+  Serial.print("Verbinde mit "); Serial.println(SSID);
+  WiFi.disconnect();
   WiFi.begin(SSID, PASSWORD);
-  Serial.print("Verbinde mit "); Serial.print(SSID);
-  uint8_t tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 40) {
-    delay(500); Serial.print('.'); tries++;
-  }
+  lastConnectTryMs = millis();
+}
+
+void checkWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
-    gigaIP = WiFi.gatewayIP();
-    Serial.print("\nVerbunden. IP: "); Serial.print(WiFi.localIP());
-    Serial.print("  Giga IP: "); Serial.println(gigaIP);
-  } else {
-    Serial.println("\nFehlgeschlagen — Neustart.");
-    delay(1000);
-    ESP.restart();
+    if (!wifiReady) {
+      wifiReady = true;
+      gigaIP = WiFi.gatewayIP();
+      if (!udpStarted) { udp.begin(UDP_PORT); udpStarted = true; }
+      Serial.print("Verbunden. IP: "); Serial.print(WiFi.localIP());
+      Serial.print("  Giga IP: "); Serial.println(gigaIP);
+    }
+    return;
   }
+  if (wifiReady) { wifiReady = false; Serial.println("WiFi verloren — reconnect..."); }
+  if (millis() - lastConnectTryMs > 10000) connectWiFi();
 }
 
 // ── Debug-Timer ──
@@ -206,36 +243,28 @@ void setup() {
   RadarSerial.begin(256000, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
   delay(300);
 
-  connectWiFi();
-  udp.begin(UDP_PORT);
-
-  sendMultiTargetCmd();
+  WiFi.mode(WIFI_STA);
+  connectWiFi();            // kehrt sofort zurück; Verbindung wird in loop() geprüft
+  startMultiTargetCmd();    // läuft in loop() schrittweise ab
   lastCmdMs   = millis();
   lastDebugMs = millis();
 
-  // RX-Buffer nach CMD leeren + Parser-State reset
-  delay(500);
-  while (RadarSerial.available()) RadarSerial.read();
-  inFrame = false; plIdx = 0; hdrIdx = 0;
-
-  Serial.print("Bereit — UDP an "); Serial.println(gigaIP);
+  Serial.println("Bereit — Radar wird gelesen, WiFi verbindet im Hintergrund.");
 }
 
 void loop() {
-  // WiFi-Watchdog
-  if (millis() - lastCheckMs > 5000) {
+  // WiFi-Watchdog (nicht blockierend)
+  if (millis() - lastCheckMs > 1000) {
     lastCheckMs = millis();
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi verloren — reconnect...");
-      connectWiFi();
-    }
+    checkWiFi();
   }
 
   // Multi-Target CMD alle 60s wiederholen
   if (millis() - lastCmdMs > 60000) {
     lastCmdMs = millis();
-    sendMultiTargetCmd();
+    startMultiTargetCmd();
   }
+  runMultiTargetCmd();
 
   // Debug: Rohdaten-Zähler alle 2s ausgeben
   if (millis() - lastDebugMs > 2000) {

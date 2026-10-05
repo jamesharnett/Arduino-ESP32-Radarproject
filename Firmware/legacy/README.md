@@ -1,21 +1,24 @@
-# Legacy v1 firmware (reference only)
+# Legacy v1.1 firmware (reference only)
 
-These are the original two sketches by Sudo_solder, kept so the first-generation
-build (GIGA R1 as access point, XIAO as client, 32-byte packed-struct packets on
-UDP 4210) can still be flashed and compared against. They are **not** compatible
-with the current sensor node, display or uConsole viewer, which use the RadarLink
-protocol in `docs/PROTOCOL.md`.
+These are the original author's two sketches in their current upstream form,
+**Firmware 1.1** (Stevee87/Arduino-ESP32-Radarproject, October 2026): the GIGA R1
+hosts the access point, the XIAO is a client, and the data is a 32-byte
+packed-struct packet on UDP 4210. They are **not** compatible with the RadarLink
+sensor node, display or uConsole viewer in this repository, which use the
+protocol in `docs/PROTOCOL.md`. They are kept so the first-generation build can
+still be flashed and compared against.
 
-The only change made here is the `WiFiUdp.h` include name in the receiver, which
-the Mbed core ships in that case and which failed to compile on Linux as `WiFiUDP.h`.
+Firmware 1.1 already contains the fixes contributed from this fork (merged
+upstream as pull requests #2 to #5): the `WiFiUdp.h` include name, the checked
+access-point start, draining the UDP queue every loop, the `fb[16]` buffer,
+the non-blocking Wi-Fi connection and radar configuration, and the clustering
+speed fix. Upstream ships them in folders named `rd03d_giga_receiver v1.1` and
+`rd03d_xiao_s3_sender v1.1`, which the Arduino IDE cannot open in place because
+a sketch folder must carry the sketch's own name; here they sit in folders the
+IDE accepts.
 
-Known issues in this code, found in the audit that led to the rewrite:
-
-* the transmitter unicasts to the Wi-Fi gateway only, so a second viewer gets nothing;
-* the GIGA reads one UDP datagram per loop while each dot erase re-walks the whole
-  sector with ~125k trig calls, so the display lags under load and never catches up;
-* a blocking 20 s Wi-Fi connect followed by `ESP.restart()` reboot-loops the XIAO;
-* a 650 ms blocking re-configuration of the radar every 60 s;
-* `WiFi.beginAP()` failure is never checked, so a missing Wi-Fi firmware looks like a boot-order problem;
-* the README's `192.168.4.1` is wrong for this core (the AP is `192.168.3.1`);
-* `char fb[12]` overflows after 100 million frames (about 116 days).
+Remaining known issue in this code: `tone()` in the Arduino Mbed core leaks a
+`DigitalOut` on every call (`Tone::stop()` nulls the pointer before the
+destructor deletes it), so the distance-reactive buzzer exhausts the heap after
+an hour or two of pinging. The RadarLink GIGA display drives its buzzer with a
+sketch-owned ticker instead.
