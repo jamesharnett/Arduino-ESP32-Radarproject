@@ -108,7 +108,7 @@ at the same time.
 |---|---|---|
 | TX | D0 (GPIO1) | UART1 RX |
 | RX | D1 (GPIO2) | UART1 TX |
-| BAT+ | — | 3,7 V from the TP4056 |
+| VCC | — | 5V from the step-up converter output (see *Power (radar side)* above), not from the XIAO's `5V` pin |
 | GND | GND | |
 
 CAUTION: When charging the battery, set the POWER button to OFF. The same applies when the microcontroller is connected via USB-C. 
@@ -167,9 +167,10 @@ battery leads.
 
 ## Firmware
 
-Open `Firmware/rd03d_xiao_s3_transmitter/rd03d_xiao_s3_transmitter.ino` and flash it to
-the XIAO ESP32-S3, then open `Firmware/rd03d_giga_receiver/rd03d_giga_receiver.ino` and
-flash it to the GIGA R1 — both via Arduino IDE.
+Open `Firmware 1.1/rd03d_xiao_s3_sender/rd03d_xiao_s3_sender.ino` and flash it to the
+XIAO ESP32-S3, then open `Firmware 1.1/rd03d_giga_receiver/rd03d_giga_receiver.ino` and
+flash it to the GIGA R1 — both via Arduino IDE. (The Arduino IDE requires the sketch
+folder to carry the sketch's own name, which is why the folders are not suffixed.)
 
 **Board packages:**
 - `esp32` by Espressif (3.x) — board "XIAO_ESP32S3", *USB CDC On Boot: Enabled*
