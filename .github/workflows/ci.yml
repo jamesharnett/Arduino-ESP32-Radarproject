@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  software:
+    name: Protocol, parser and Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Protocol header copies identical
+        run: python3 tools/check_protocol_sync.py
+      - name: Host parser tests
+        run: |
+          g++ -std=c++11 -Wall -Wextra -Werror -I Firmware/sensor_node_esp32s3 Firmware/tests/host/test_parsers.cpp -o /tmp/test_parsers
+          /tmp/test_parsers
+      - name: Python tests (protocol, state, intrusion, relay loopback)
+        run: python3 -m unittest discover -s uconsole/tests -v
+
+  firmware:
+    name: Compile ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sensor node (XIAO ESP32-S3, LIDAR on)
+            sketch: Firmware/sensor_node_esp32s3
+            profile: xiao_esp32s3
+            lidar: "1"
+          - name: sensor node (XIAO ESP32-S3, radar only)
+            sketch: Firmware/sensor_node_esp32s3
+            profile: xiao_esp32s3
+            lidar: "0"
+          - name: GIGA display (Mbed core)
+            sketch: Firmware/giga_display
+            profile: giga
+            lidar: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.arduino15
+          key: arduino15-${{ matrix.profile }}-${{ hashFiles(format('{0}/sketch.yaml', matrix.sketch)) }}
+      - name: Select build level
+        if: matrix.lidar == '0'
+        run: sed -i 's/#define ENABLE_LIDAR       1/#define ENABLE_LIDAR       0/' ${{ matrix.sketch }}/config.h
+      - name: Compile with the sketch.yaml profile
+        run: arduino-cli compile --profile ${{ matrix.profile }} --warnings all ${{ matrix.sketch }}

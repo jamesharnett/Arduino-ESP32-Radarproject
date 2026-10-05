@@ -1,0 +1,10 @@
+# arduino-cli build profile:  arduino-cli compile --profile xiao_esp32s3 Firmware/sensor_node_esp32s3
+# Board settings used by the Arduino IDE: "XIAO_ESP32S3", USB CDC On Boot = Enabled,
+# Flash 8 MB, partition "default_8MB", PSRAM disabled (all defaults).
+profiles:
+  xiao_esp32s3:
+    fqbn: esp32:esp32:XIAO_ESP32S3
+    platforms:
+      - platform: esp32:esp32 (3.3.12)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+default_profile: xiao_esp32s3

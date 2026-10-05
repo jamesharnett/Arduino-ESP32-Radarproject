@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# RadarLink recordings (keep the repository small; share them separately)
+*.rdl
+
+# Arduino / editor build output
+build/
+*.bin
+*.elf
+*.hex
+.vscode/
+.idea/
+
+# RadarLink runtime files (uConsole viewer)
+baseline.json
+alerts.log
