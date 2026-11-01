@@ -13,6 +13,8 @@
 #include <WiFiUdp.h>
 #include "Arduino_GigaDisplay_GFX.h"
 #include "Arduino_GigaDisplayTouch.h"
+#include "pinDefinitions.h"
+#include "mbed.h"
 
 // ── Netzwerk ──
 const char*    AP_SSID = "RadarNet";
@@ -47,6 +49,39 @@ const uint16_t PING_STAGE1_MS = 26;
 const uint16_t PING_STAGE2_MS = 24;
 const uint16_t PING_STAGE3_MS = 30;
 #define BEEP_DUR_MS  (PING_STAGE1_MS + PING_STAGE2_MS + PING_STAGE3_MS)   // Gesamtlänge eines Pings
+
+// ── Buzzer ohne tone() ──
+// tone() des Arduino-Mbed-Cores legt bei jedem Aufruf ein mbed::DigitalOut an und
+// gibt es nie frei (Tone::stop() setzt den Zeiger auf 0, bevor der Destruktor
+// ihn löscht). Bei mehreren Pings pro Sekunde ist der Heap nach ein bis zwei
+// Stunden erschöpft und das Display friert ein. Daher ein eigener Ticker +
+// DigitalOut, einmal angelegt, mit derselben Semantik (Frequenz, Dauer).
+static mbed::DigitalOut *buzzerOut = nullptr;
+static mbed::Ticker      buzzerTicker;
+static mbed::Timeout     buzzerTimeout;
+
+static void buzzerToggle()    { if (buzzerOut) *buzzerOut = !*buzzerOut; }
+static void buzzerTimeoutCb() { buzzerTicker.detach(); if (buzzerOut) *buzzerOut = 0; }
+
+static void buzzerBegin() {
+  if (!buzzerOut) buzzerOut = new mbed::DigitalOut(digitalPinToPinName(BUZZER_PIN), 0);
+}
+
+// Ersatz für buzzerStop()
+static void buzzerStop() {
+  buzzerTimeout.detach();
+  buzzerTicker.detach();
+  if (buzzerOut) *buzzerOut = 0;
+}
+
+// Ersatz für buzzerTone(freq, dauer): Rechteck mit freq Hz, stoppt nach dauer ms
+static void buzzerTone(uint16_t freqHz, uint32_t durationMs) {
+  if (!buzzerOut || freqHz == 0) return;
+  buzzerTimeout.detach();
+  buzzerTicker.detach();
+  buzzerTicker.attach(mbed::callback(buzzerToggle), std::chrono::microseconds(500000UL / freqHz));
+  if (durationMs) buzzerTimeout.attach(mbed::callback(buzzerTimeoutCb), std::chrono::milliseconds(durationMs));
+}
 
 const float    BEEP_DIST_MIN      = 300.0f;   // mm — ab hier schnellster/höchster Ping
 const float    BEEP_DIST_MAX      = 8000.0f;  // mm — ab hier langsamster/tiefster Ping
@@ -586,17 +621,17 @@ void updateTrackerSound() {
   uint32_t now = millis();
 
   if (buzzerMuted) {
-    if (beepActive) { noTone(BUZZER_PIN); beepActive = false; chirpStage = 0; }
+    if (beepActive) { buzzerStop(); beepActive = false; chirpStage = 0; }
     return;
   }
 
   // Chirp-Stufen weiterschalten: tief -> mittel -> Zielfrequenz -> fertig
   if (chirpStage == 1 && (now - chirpStageStart >= PING_STAGE1_MS)) {
-    tone(BUZZER_PIN, (uint16_t)(chirpMainFreq * 0.80f), PING_STAGE2_MS);
+    buzzerTone((uint16_t)(chirpMainFreq * 0.80f), PING_STAGE2_MS);
     chirpStage = 2;
     chirpStageStart = now;
   } else if (chirpStage == 2 && (now - chirpStageStart >= PING_STAGE2_MS)) {
-    tone(BUZZER_PIN, chirpMainFreq, PING_STAGE3_MS);
+    buzzerTone(chirpMainFreq, PING_STAGE3_MS);
     chirpStage = 3;
     chirpStageStart = now;
   } else if (chirpStage == 3 && (now - chirpStageStart >= PING_STAGE3_MS)) {
@@ -614,7 +649,7 @@ void updateTrackerSound() {
   uint16_t freq     = BEEP_FREQ_MAX     - (uint16_t)(t * (BEEP_FREQ_MAX - BEEP_FREQ_MIN));
 
   if (chirpStage == 0 && (now - lastBeepMs >= interval)) {
-    tone(BUZZER_PIN, (uint16_t)(freq * 0.55f), PING_STAGE1_MS);  // tiefer Einstieg, steigt danach an
+    buzzerTone((uint16_t)(freq * 0.55f), PING_STAGE1_MS);  // tiefer Einstieg, steigt danach an
     chirpMainFreq   = freq;
     chirpStage      = 1;
     chirpStageStart = now;
@@ -631,7 +666,7 @@ void updateBackgroundPulse() {
   uint32_t now = millis();
 
   if (buzzerMuted) {
-    if (pulseActive) { noTone(BUZZER_PIN); pulseActive = false; }
+    if (pulseActive) { buzzerStop(); pulseActive = false; }
     return;
   }
 
@@ -645,7 +680,7 @@ void updateBackgroundPulse() {
   }
 
   if (!pulseActive && (now - lastPulseMs >= PULSE_INTERVAL_MS)) {
-    tone(BUZZER_PIN, PULSE_FREQ, PULSE_DUR_MS);
+    buzzerTone(PULSE_FREQ, PULSE_DUR_MS);
     pulseActive  = true;
     pulseStartMs = now;
     lastPulseMs  = now;
@@ -742,8 +777,7 @@ void setup() {
   touch.begin();
   Wire1.begin();
 
-  pinMode(BUZZER_PIN, OUTPUT);
-  noTone(BUZZER_PIN);
+  buzzerBegin();
 
   for (int i=0; i<MAX_TARGETS; i++) {
     targets[i] = lastDrawn[i] = {0,0,0,false};
