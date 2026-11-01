@@ -1,0 +1,24 @@
+# systemd unit for the headless RadarLink relay / alarm daemon on the uConsole.
+#
+#   sudo cp radar-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now radar-relay
+#   journalctl -u radar-relay -f
+#
+# Adjust User, WorkingDirectory and the options. The web view is reachable on
+# port 8080 from the Wi-Fi network and, with Tailscale, from your tailnet; set a
+# --web-token before exposing it. Remote viewers use: radar_viewer.py --node <this host>
+[Unit]
+Description=RadarLink relay, alarm daemon and web view
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Arduino-ESP32-Radarproject/uconsole
+ExecStart=/usr/bin/python3 /home/pi/Arduino-ESP32-Radarproject/uconsole/radar_relay.py --web 8080 --armed --baseline /home/pi/radarlink/baseline.json --alert-log /home/pi/radarlink/alerts.log --snapshot-dir /home/pi/radarlink/snapshots
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

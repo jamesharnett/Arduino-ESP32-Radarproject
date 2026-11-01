@@ -1,0 +1,14 @@
+# arduino-cli build profile:  arduino-cli compile --profile giga Firmware/giga_display
+# Use the "Arduino Mbed OS GIGA Boards" core, not the newer Zephyr-based GIGA core:
+# its WiFi.beginAP()/begin() signatures differ and tone()/touch are untested there.
+profiles:
+  giga:
+    fqbn: arduino:mbed_giga:giga
+    platforms:
+      - platform: arduino:mbed_giga (4.6.0)
+    libraries:
+      - Arduino_GigaDisplay_GFX (1.2.0)
+      - Arduino_GigaDisplayTouch (1.1.2)
+      - Adafruit GFX Library (1.12.6)
+      - Adafruit BusIO (1.17.4)
+default_profile: giga
