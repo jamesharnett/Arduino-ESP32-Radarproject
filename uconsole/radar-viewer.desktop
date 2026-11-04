@@ -1,0 +1,10 @@
+# XDG autostart entry for the RadarLink viewer: copy to ~/.config/autostart/ (install.sh does this,
+# with the path filled in). Raspberry Pi OS starts these entries on login under X11 and Wayland.
+[Desktop Entry]
+Type=Application
+Name=RadarLink viewer
+Comment=Radar and LIDAR view of the sensor node
+Exec=/usr/bin/python3 /home/pi/Arduino-ESP32-Radarproject/uconsole/radar_viewer.py
+Path=/home/pi/Arduino-ESP32-Radarproject/uconsole
+Terminal=false
+X-GNOME-Autostart-enabled=true
