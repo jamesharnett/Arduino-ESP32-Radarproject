@@ -15,11 +15,17 @@ jobs:
           python-version: "3.11"
       - name: Protocol header copies identical
         run: python3 tools/check_protocol_sync.py
-      - name: Host parser tests
+      - name: Host tests (parsers, console parser, self-diagnosis)
         run: |
           g++ -std=c++11 -Wall -Wextra -Werror -I Firmware/sensor_node_esp32s3 Firmware/tests/host/test_parsers.cpp -o /tmp/test_parsers
           /tmp/test_parsers
-      - name: Python tests (protocol, state, intrusion, relay loopback)
+          g++ -std=c++11 -Wall -Wextra -Werror -I Firmware/sensor_node_esp32s3 Firmware/tests/host/test_node_logic.cpp -o /tmp/test_node_logic
+          /tmp/test_node_logic
+      - name: Shell scripts (shellcheck)
+        run: |
+          bash -n uconsole/install.sh
+          shellcheck -S warning uconsole/install.sh tools/check.sh
+      - name: Python tests (protocol, sensors vs C++, state, intrusion, relay, tools, analyzer, doctor, installer)
         run: python3 -m unittest discover -s uconsole/tests -v
 
   firmware:

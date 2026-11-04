@@ -94,17 +94,23 @@ Two build levels share the same firmware and displays:
 ### Repository layout
 
 ```
-Firmware/sensor_node_esp32s3/   ESP32-S3 sketch: config.h, radar_protocol.h, rd03d_parser.h, ld19_parser.h
+Firmware/sensor_node_esp32s3/   ESP32-S3 sketch: config.h, radar_protocol.h, rd03d_parser.h, ld19_parser.h,
+                                node_console.h (serial commands), node_diag.h (self-diagnosis)
 Firmware/giga_display/          GIGA R1 sketch: config.h, radar_protocol.h (identical copy)
-Firmware/tests/host/            parser unit tests that run on your PC with g++
+Firmware/tests/host/            parser, console and diagnosis unit tests that run on your PC with g++
 Firmware/legacy/                the original v1 sketches, reference only (incompatible protocol)
 uconsole/                       radar_viewer.py (display), radar_relay.py (headless relay + alarm + web view),
-                                radar_intrusion.py, radar_protocol.py, radar_state.py, fake_sensor_node.py, tests/
-.github/workflows/ci.yml        tests and both firmware builds on every push; tools/check.sh runs the same locally
+                                radar_intrusion.py, radar_protocol.py, radar_state.py, radar_sensors.py (RD-03D/LD19
+                                parsers in Python), fake_sensor_node.py, install.sh + doctor.py (uConsole setup
+                                and health check), tests/
+tools/analyze_log.py            reads serial logs and .rdl recordings, reports rates, loss, histograms, a diagnosis
+tools/decode_capture.py         decodes the hex the node prints for "raw radar" / "raw lidar"
+tools/sensor_probe.py           reads a sensor directly over a USB-UART adapter (pyserial)
+tools/check.sh                  every check in one command; tools/check_protocol_sync.py: the two headers must match
+.github/workflows/ci.yml        tests, shellcheck and both firmware builds on every push
 docs/PROTOCOL.md                wire format
-docs/TESTING.md                 bring-up, expected serial output, calibration, troubleshooting
-tools/check_protocol_sync.py    fails if the two radar_protocol.h copies differ
-CAD files/                      3D-printable enclosures from the v1 build (see Enclosures)
+docs/TESTING.md                 bring-up, expected serial output, the serial console, calibration, triage flowchart
+CAD files/                      3D-printable enclosures: v1 STLs and the parametric Level 2 OpenSCAD model
 ```
 
 -------------------------------------------------------------------------------
@@ -186,7 +192,7 @@ Trim the MT3608 to 5.0 V with a meter **before** connecting the sensors.
 | RD-03D GND | GND | – | |
 | LD19 TX | D2 | 3 | UART2 RX, 230400 baud |
 | (LD19 has no RX) | D3 | 4 | reserved as UART2 TX, leave unconnected |
-| LD19 PWM | – | – | leave unconnected: the LD19 then regulates its own motor at 10 Hz |
+| LD19 PWM | GND | – | tie to GND: the LD19 then regulates its own motor at 10 Hz (the 2022 development manual requires this; the 2021 datasheet said "leave open") |
 | LD19 P5V | – | – | 5.0 V from the MT3608 |
 | LD19 GND | GND | – | |
 
@@ -208,6 +214,16 @@ Antenna: plug the XIAO's u.FL antenna in and route it away from the LiPo and the
 magnets. Without it the Wi-Fi range is a few metres at best. Keep a plastic,
 metal-free window in front of the RD-03D and the LD19's optical ring clear all
 round.
+
+Mount the RD-03D with its **44 mm axis vertical, antenna face toward the room,
+connector end down**. Its ±60° field of view opens across the board's 15 mm
+width, so a board lying on its side sweeps up and down instead of left and
+right. In that posture a target on the sensor's right has a positive x, which
+is what the displays expect; mounted connector-end up, set `RADAR_MIRROR_X 1`
+(GIGA) / `--mirror-radar` (viewer). The LD19's 0° direction points through its
+single rear mounting ear, away from the connector, and angles grow clockwise
+seen from above; point that ear the same way as the radar and
+`LIDAR_ANGLE_OFFSET_DEG` starts near 0 (confirm with the calibration walk).
 
 ### GIGA display
 
@@ -244,7 +260,7 @@ Nothing to wire.
 | Sensor node | `esp32` by Espressif (Boards Manager URL `https://espressif.github.io/arduino-esp32/package_esp32_index.json`) | 3.3.x | board **XIAO_ESP32S3**, *USB CDC On Boot: Enabled* (default) |
 | GIGA display | **Arduino Mbed OS GIGA Boards** | 4.6.x | not the Zephyr-based GIGA core: different Wi-Fi API |
 | GIGA display | Arduino_GigaDisplay_GFX, Arduino_GigaDisplayTouch | 1.2.0, 1.1.2 | pulls in Adafruit GFX Library and Adafruit BusIO |
-| uConsole | Python 3, pygame ≥ 2.1, numpy (audio only) | | |
+| uConsole | Python 3, pygame ≥ 2.1, numpy (audio only); pyserial only for `tools/sensor_probe.py` | | `uconsole/install.sh` installs the Debian packages |
 
 Both sketch folders contain a `sketch.yaml` with these pins for `arduino-cli`.
 
@@ -257,7 +273,10 @@ Both sketch folders contain a `sketch.yaml` with these pins for `arduino-cli`.
    *XIAO_ESP32S3*, upload. Or: `arduino-cli compile --profile xiao_esp32s3 -u -p /dev/ttyACM0 Firmware/sensor_node_esp32s3`.
 3. Open the serial monitor at 115200. You should see the AP come up and, every
    2 s, a `[stat]` line with radar (and lidar) frame rates. Expected values are
-   in [docs/TESTING.md](docs/TESTING.md).
+   in [docs/TESTING.md](docs/TESTING.md). Type `diag` in the monitor and the
+   node tells you itself what is wrong (no bytes, wrong baud, bad frames, no
+   subscriber); `?` lists the other commands (`raw radar` dumps the sensor's
+   bytes for `tools/decode_capture.py`, `wifi` shows joined stations with RSSI).
 
 ### 2. Flash the GIGA display
 
@@ -272,16 +291,26 @@ Both sketch folders contain a `sketch.yaml` with these pins for `arduino-cli`.
 ### 3. Set up the uConsole
 
 ```bash
-# join the sensor node's network and keep any LTE/other uplink as default route
-nmcli dev wifi connect RadarSystem password 'your-password'
-nmcli con modify RadarSystem ipv4.never-default yes ipv4.ignore-auto-dns yes 802-11-wireless.powersave 2
-# (powersave 2 = off: a sleeping Wi-Fi client delays small UDP packets)
-
-sudo apt install python3-pygame python3-numpy        # Raspberry Pi OS / Debian
 git clone https://github.com/jamesharnett/Arduino-ESP32-Radarproject
 cd Arduino-ESP32-Radarproject/uconsole
+./install.sh --ask-password                          # packages, Wi-Fi profile; add --viewer-autostart or --relay
+nmcli con up RadarSystem                             # or wait for autoconnect
+python3 doctor.py                                    # checks the link and talks to the node; prints fixes
 python3 radar_viewer.py                              # fullscreen; ESC quits
 ```
+
+The installer is idempotent and has `--dry-run` and `--uninstall`. It creates a
+NetworkManager profile for the node's network with `ipv4.never-default yes`
+(the node has no internet, so any LTE or other uplink stays the default route),
+`802-11-wireless.powersave 2` (off: a sleeping Wi-Fi client delays and drops
+the small UDP datagrams) and endless autoconnect retries, installs
+`python3-pygame python3-numpy iw` with apt, and optionally the viewer autostart
+entry (`~/.config/autostart/radar-viewer.desktop`) or the relay systemd service.
+Without NetworkManager do the same by hand: join the network, set the route
+preference and `iw dev wlan0 set power_save off`. `doctor.py` then checks the
+Python modules, the graphical session, the active network, the address and
+route, power save, the firewall, whether UDP 4210 is free, and finally sends a
+HELLO to the node and prints the STATUS it answers with.
 
 Keys: `UP/DOWN` zoom (2/4/8/12 m), `M` mute, `L` LIDAR on/off, `F` fullscreen,
 `A` arm/disarm intrusion detection, `B` learn the empty-room baseline (10 s),
@@ -363,9 +392,20 @@ python3 fake_sensor_node.py --write demo.rdl --seconds 20   # or write a recordi
 python3 radar_viewer.py --replay demo.rdl --windowed --loop
 python3 fake_sensor_node.py --quiet-room --intruder-after 15 &          # empty room, then an intruder
 python3 radar_viewer.py --node 127.0.0.1 --windowed --learn 8         # learns, arms, alerts at ~15 s
-python3 -m unittest discover -s tests                # protocol + state tests
+python3 -m unittest discover -s tests                # protocol, parsers vs C++, state, intrusion, relay, tools, doctor, installer
 g++ -std=c++11 -Wall -Wextra -Werror -I ../Firmware/sensor_node_esp32s3 ../Firmware/tests/host/test_parsers.cpp -o /tmp/t && /tmp/t
+g++ -std=c++11 -Wall -Wextra -Werror -I ../Firmware/sensor_node_esp32s3 ../Firmware/tests/host/test_node_logic.cpp -o /tmp/t2 && /tmp/t2
+../tools/check.sh                                    # all of the above plus shellcheck and, with arduino-cli, both firmware builds
 ```
+
+Three tools help once hardware is on the bench, all without pygame:
+`tools/sensor_probe.py` reads an RD-03D or LD19 straight from a USB-UART adapter
+(pyserial) and shows the decoded targets or scan rate; `tools/decode_capture.py`
+decodes the hex the node prints for `raw radar` / `raw lidar` and names the
+classic faults (wrong baud, idle line, lost bytes); `tools/analyze_log.py` reads
+saved serial logs and `.rdl` recordings and reports rates, packet loss, reboots,
+heap trend, range and sector histograms and a diagnosis, optionally as a PNG
+plot. Details and expected output: [docs/TESTING.md](docs/TESTING.md).
 
 -------------------------------------------------------------------------------
 
