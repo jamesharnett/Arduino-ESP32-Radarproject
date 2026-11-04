@@ -532,6 +532,10 @@ Firmware and documentation were audited before this rewrite. Fixed here:
   "R4" labels.
 * Sentinel-speed filter, clustering keeps the faster speed, `fb[12]` overflow
   after 10⁸ frames gone, toolchain versions pinned, tests added.
+* Bring-up without guesswork: the node's serial console diagnoses itself
+  (`diag`) and dumps raw sensor bytes (`raw radar`, `raw lidar`), the PC-side
+  tools decode those dumps, read a sensor directly over USB-UART and analyse
+  saved logs and recordings, and the uConsole has an installer and a doctor.
 
 -------------------------------------------------------------------------------
 
