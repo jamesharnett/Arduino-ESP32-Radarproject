@@ -25,7 +25,7 @@
 #define RADAR_RX_PIN       1          /* D0  <- RD-03D TX (OT1)                 */
 #define RADAR_TX_PIN       2          /* D1  -> RD-03D RX                       */
 #define LIDAR_RX_PIN       3          /* D2  <- LD19 TX                         */
-#define LIDAR_TX_PIN       4          /* D3  -> LD19 RX (LD19 ignores it)       */
+#define LIDAR_TX_PIN       4          /* D3: UART2 TX, unused (the LD19 has no RX; tie its PWM pin to GND) */
 #define STATUS_LED_PIN     LED_BUILTIN /* XIAO user LED, GPIO21, active LOW     */
 #define STATUS_LED_ACTIVE_LOW 1
 
@@ -50,5 +50,14 @@
 
 /* ------------------------------------------------------------- diagnostics */
 #define DEBUG_INTERVAL_MS          2000   /* serial statistics period            */
+
+/* Serial console "raw radar|lidar [N]": bytes are buffered in RAM while the
+ * parsers keep running, then printed as hex a few lines per loop() pass.       */
+#define RAW_CAPTURE_MAX            6144   /* buffer; 204 radar or 130 LD19 frames */
+#define RAW_DEFAULT_RADAR_BYTES    600    /* 20 RD-03D frames                    */
+#define RAW_DEFAULT_LIDAR_BYTES    4700   /* 100 LD19 frames                     */
+#define RAW_CAPTURE_TIMEOUT_MS     10000  /* give up (and dump what came) after this */
+#define RAW_DUMP_BYTES_PER_LINE    32
+#define RAW_DUMP_LINES_PER_LOOP    4
 
 #endif /* SENSOR_NODE_CONFIG_H */

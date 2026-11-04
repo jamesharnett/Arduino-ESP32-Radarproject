@@ -14,6 +14,8 @@
  *   - lidar datagrams never exceed 508 bytes (the GIGA's UDP buffer)
  *   - diagnostics on the USB serial port every DEBUG_INTERVAL_MS, and in the
  *     STATUS packet so the displays can show them too
+ *   - a serial console (type ? in the serial monitor): self-diagnosis, raw
+ *     UART captures, subscriber and Wi-Fi station lists (node_console.h)
  *
  * Board: "XIAO_ESP32S3" (esp32 core 3.x), USB CDC On Boot = Enabled (default).
  * Credits: RD-03D handling after Sudo_solder's Arduino-ESP32-Radarproject,
@@ -25,7 +27,17 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <esp_wifi.h>
+#include <esp_idf_version.h>
 #include <esp_arduino_version.h>
+#if defined(__has_include)
+#if __has_include(<esp_wifi_ap_get_sta_list.h>)
+#include <esp_wifi_ap_get_sta_list.h>  /* esp_wifi_ap_get_sta_list_with_ip(), IDF 5.x */
+#define HAVE_STA_IP_LIST 1
+#endif
+#endif
+#ifndef HAVE_STA_IP_LIST
+#define HAVE_STA_IP_LIST 0
+#endif
 
 #include "config.h"
 #include "radar_protocol.h"
@@ -33,6 +45,8 @@
 #if ENABLE_LIDAR
 #include "ld19_parser.h"
 #endif
+#include "node_console.h"
+#include "node_diag.h"
 
 static_assert(sizeof(WIFI_PASS) - 1 >= 8 && sizeof(WIFI_PASS) - 1 <= 63,
               "WIFI_PASS must be 8..63 characters (WPA2)");
@@ -96,6 +110,16 @@ struct Subscriber {
 };
 static Subscriber subs[WIFI_MAX_CLIENTS];
 
+/* serial console and raw UART capture */
+enum RawSource : uint8_t { RAW_NONE = 0, RAW_RADAR = 1, RAW_LIDAR = 2 };
+static ConsoleLine console;
+static bool        logEnabled = true;
+static uint8_t     rawBuf[RAW_CAPTURE_MAX];
+static size_t      rawLen = 0, rawTarget = 0, rawDumpPos = 0;
+static RawSource   rawSource = RAW_NONE;
+static bool        rawCapturing = false, rawDumping = false;
+static uint32_t    rawStartMs = 0, rawEndMs = 0;
+
 /* timing */
 static uint32_t lastStatusMs = 0, lastDebugMs = 0;
 
@@ -104,6 +128,14 @@ static uint8_t subscriberCount() {
     uint8_t n = 0;
     for (auto &s : subs) if (s.used) n++;
     return n;
+}
+
+static const char *receiverKindName(uint8_t kind) {
+    switch (kind) {
+        case RL_RECEIVER_GIGA:     return "GIGA";
+        case RL_RECEIVER_UCONSOLE: return "uConsole";
+        default:                   return "other";
+    }
 }
 
 static void subscriberHello(const IPAddress &ip, uint16_t port, const RlHelloPacket &h, uint32_t now) {
@@ -166,8 +198,71 @@ static void pollHello(uint32_t now) {
     }
 }
 
+/* ------------------------------------------------------------ raw capture */
+/* "raw radar [N]" / "raw lidar [N]" on the console: the next N bytes from that
+ * UART are copied into rawBuf while the parsers keep running, then printed as
+ * hex, a few lines per loop() pass so nothing blocks. tools/decode_capture.py
+ * turns the paste back into frames. */
+static const char *rawSourceName() { return rawSource == RAW_RADAR ? "radar" : "lidar"; }
+
+static void rawFinish(uint32_t now) {
+    rawCapturing = false;
+    rawDumping = true;
+    rawDumpPos = 0;
+    rawEndMs = now;
+    Serial.printf("[raw %s] %u bytes in %lu ms; paste everything from here to 'end' into tools/decode_capture.py\n",
+                  rawSourceName(), (unsigned)rawLen, (unsigned long)(now - rawStartMs));
+}
+
+static void rawStart(RawSource source, long n, uint32_t now) {
+    if (rawCapturing || rawDumping) {
+        Serial.println("[raw] a capture is already running");
+        return;
+    }
+    if (n <= 0) n = (source == RAW_RADAR) ? RAW_DEFAULT_RADAR_BYTES : RAW_DEFAULT_LIDAR_BYTES;
+    if (n > (long)RAW_CAPTURE_MAX) n = RAW_CAPTURE_MAX;
+    rawSource = source;
+    rawTarget = (size_t)n;
+    rawLen = 0;
+    rawCapturing = true;
+    rawDumping = false;
+    rawStartMs = now;
+    Serial.printf("[raw %s] capturing %u bytes (gives up after %u ms) ...\n",
+                  rawSourceName(), (unsigned)rawTarget, (unsigned)RAW_CAPTURE_TIMEOUT_MS);
+}
+
+static inline void rawFeed(RawSource source, uint8_t c, uint32_t now) {
+    if (!rawCapturing || source != rawSource) return;
+    rawBuf[rawLen++] = c;
+    if (rawLen >= rawTarget) rawFinish(now);
+}
+
+static void rawRun(uint32_t now) {
+    if (rawCapturing && (now - rawStartMs) > RAW_CAPTURE_TIMEOUT_MS) {
+        Serial.printf("[raw %s] timed out with %u of %u bytes: that UART is (nearly) silent\n",
+                      rawSourceName(), (unsigned)rawLen, (unsigned)rawTarget);
+        rawFinish(now);
+    }
+    if (!rawDumping) return;
+    char line[RAW_DUMP_BYTES_PER_LINE * 3 + 1];
+    for (int lines = 0; lines < RAW_DUMP_LINES_PER_LOOP && rawDumpPos < rawLen; lines++) {
+        size_t n = rawLen - rawDumpPos;
+        if (n > RAW_DUMP_BYTES_PER_LINE) n = RAW_DUMP_BYTES_PER_LINE;
+        for (size_t i = 0; i < n; i++) snprintf(line + 3 * i, 4, "%02X ", rawBuf[rawDumpPos + i]);
+        line[3 * n - 1] = '\0';
+        Serial.printf("[raw %s] %s\n", rawSourceName(), line);
+        rawDumpPos += n;
+    }
+    if (rawDumpPos >= rawLen) {
+        rawDumping = false;
+        Serial.printf("[raw %s] end\n", rawSourceName());
+    }
+}
+
 /* ------------------------------------------------------------------ radar */
-static void drainRadar() { while (RadarSerial.available()) RadarSerial.read(); }
+static void drainRadar(uint32_t now) {
+    while (RadarSerial.available()) rawFeed(RAW_RADAR, (uint8_t)RadarSerial.read(), now);
+}
 
 static void radarConfigStart(uint32_t now) {
     cfgState = CFG_WAIT_BOOT;
@@ -182,22 +277,22 @@ static void radarConfigRun(uint32_t now) {
     if (!radarConfiguring() || (int32_t)(now - cfgDueMs) < 0) return;
     switch (cfgState) {
         case CFG_WAIT_BOOT:
-            drainRadar();
+            drainRadar(now);
             RadarSerial.write(RD03D_CMD_ENABLE_CONFIG, sizeof(RD03D_CMD_ENABLE_CONFIG));
             cfgState = CFG_SENT_ENABLE; cfgDueMs = now + 200;
             break;
         case CFG_SENT_ENABLE:
-            drainRadar();
+            drainRadar(now);
             RadarSerial.write(RD03D_CMD_MULTI_TARGET, sizeof(RD03D_CMD_MULTI_TARGET));
             cfgState = CFG_SENT_MULTI; cfgDueMs = now + 200;
             break;
         case CFG_SENT_MULTI:
-            drainRadar();
+            drainRadar(now);
             RadarSerial.write(RD03D_CMD_END_CONFIG, sizeof(RD03D_CMD_END_CONFIG));
             cfgState = CFG_SENT_END; cfgDueMs = now + 200;
             break;
         case CFG_SENT_END:
-            drainRadar();
+            drainRadar(now);
             radarParser.reset();
             radarConfigured = true;
             lastRadarFrameMs = now;          /* grace period before the silence check */
@@ -210,10 +305,11 @@ static void radarConfigRun(uint32_t now) {
 }
 
 static void readRadar(uint32_t now) {
-    if (radarConfiguring()) { drainRadar(); return; }   /* ACK frames, not reports */
+    if (radarConfiguring()) { drainRadar(now); return; }   /* ACK frames, not reports */
     while (RadarSerial.available()) {
         uint8_t c = (uint8_t)RadarSerial.read();
         radarBytes++;
+        rawFeed(RAW_RADAR, c, now);
         if (!radarParser.feed(c, radarFrame)) continue;
         rd03dProcess(radarFrame, radarOpts, radarPkt);
         radarPkt.frame_count = ++radarFrameCount;
@@ -247,6 +343,7 @@ static void readLidar(uint32_t now) {
     while (LidarSerial.available()) {
         uint8_t c = (uint8_t)LidarSerial.read();
         lidarBytes++;
+        rawFeed(RAW_LIDAR, c, now);
         if (!lidarParser.feed(c, lidarFrame)) continue;
         lastLidarFrameMs = now;
         lidarFramesThisSec++;
@@ -303,6 +400,137 @@ static void printDebug(uint32_t now) {
                   (unsigned long)lidarParser.crcErrors, lidarScanSpeed);
 #endif
     Serial.printf(" | heap=%lu\n", (unsigned long)ESP.getFreeHeap());
+}
+
+/* ---------------------------------------------------------------- console */
+static void printDiag(uint32_t now) {
+    DiagInput in = {};
+    in.uptime_ms               = now;
+    in.radar_bytes             = radarBytes;
+    in.radar_frames            = radarParser.frames;
+    in.radar_bad_frames        = radarParser.badFrames;
+    in.radar_reconfigs         = radarReconfigs;
+    in.radar_fps               = radarFps;
+    in.radar_last_frame_age_ms = radarParser.frames ? (now - lastRadarFrameMs) : DIAG_NEVER;
+    in.radar_configured        = radarConfigured;
+    in.radar_configuring       = radarConfiguring();
+#if ENABLE_LIDAR
+    in.lidar_enabled           = true;
+    in.lidar_bytes             = lidarBytes;
+    in.lidar_frames            = lidarParser.frames;
+    in.lidar_crc_errors        = lidarParser.crcErrors;
+    in.lidar_fps               = lidarFps;
+    in.lidar_pps               = lidarPps;
+    in.lidar_last_frame_age_ms = lidarParser.frames ? (now - lastLidarFrameMs) : DIAG_NEVER;
+    in.lidar_speed_deg_s       = lidarScanSpeed;
+#endif
+    in.ap_up                   = apUp;
+    in.stations                = (uint8_t)WiFi.softAPgetStationNum();
+    in.subscribers             = subscriberCount();
+    in.free_heap               = ESP.getFreeHeap();
+    in.min_free_heap           = ESP.getMinFreeHeap();
+
+    DiagLine lines[DIAG_MAX_LINES];
+    size_t n = nodeDiagnose(in, lines, DIAG_MAX_LINES);
+    for (size_t i = 0; i < n; i++)
+        Serial.printf("[diag] %s %s: %s\n", diagLevelName(lines[i].level), lines[i].subsystem, lines[i].text);
+    DiagLevel worst = diagWorst(lines, n);
+    Serial.printf("[diag] result: %s\n", worst == DIAG_OK ? "all OK" : worst == DIAG_WARN ? "warnings, see above" : "FAILURES, see above");
+}
+
+static void printSubs(uint32_t now) {
+    Serial.printf("[subs] %u subscriber(s), timeout %u ms\n", subscriberCount(), (unsigned)RL_SUBSCRIBER_TIMEOUT_MS);
+    for (auto &s : subs) {
+        if (!s.used) continue;
+        Serial.printf("[subs]   %s:%u kind=%u (%s) wants=0x%02X%s%s%s hello %lu ms ago\n",
+                      s.ip.toString().c_str(), s.port, s.kind, receiverKindName(s.kind), s.wants,
+                      (s.wants & RL_WANT_RADAR) ? " radar" : "", (s.wants & RL_WANT_LIDAR) ? " lidar" : "",
+                      (s.wants & RL_WANT_STATUS) ? " status" : "", (unsigned long)(now - s.lastHelloMs));
+    }
+}
+
+static void printWifi() {
+    Serial.printf("[wifi] AP \"%s\" %s, channel %d, IP %s, UDP %u, %d station(s) of max %d\n",
+                  WIFI_SSID, apUp ? "up" : "DOWN", WIFI_CHANNEL, WiFi.softAPIP().toString().c_str(),
+                  (unsigned)RL_PORT, WiFi.softAPgetStationNum(), WIFI_MAX_CLIENTS);
+    wifi_sta_list_t stations;
+    if (esp_wifi_ap_get_sta_list(&stations) != ESP_OK) return;
+#if HAVE_STA_IP_LIST
+    wifi_sta_mac_ip_list_t ipList = {};
+    bool haveIps = esp_wifi_ap_get_sta_list_with_ip(&stations, &ipList) == ESP_OK;
+#endif
+    for (int i = 0; i < stations.num; i++) {
+        const wifi_sta_info_t &s = stations.sta[i];
+        Serial.printf("[wifi]   %02X:%02X:%02X:%02X:%02X:%02X rssi %d dBm (%s)",
+                      s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5], (int)s.rssi,
+                      s.rssi >= -60 ? "good" : s.rssi >= -75 ? "fair" : "weak: move closer, check antennas");
+#if HAVE_STA_IP_LIST
+        if (haveIps) {
+            for (int j = 0; j < ipList.num; j++) {
+                if (memcmp(ipList.sta[j].mac, s.mac, 6) != 0) continue;
+                Serial.printf(" ip " IPSTR, IP2STR(&ipList.sta[j].ip));
+            }
+        }
+#endif
+        Serial.println();
+    }
+}
+
+static void runCommand(const ConsoleCommand &cmd, uint32_t now) {
+    switch (cmd.cmd) {
+        case CON_HELP:
+            Serial.println(CONSOLE_HELP);
+            break;
+        case CON_STAT:
+            printDebug(now);
+            break;
+        case CON_DIAG:
+            printDiag(now);
+            break;
+        case CON_RAW:
+            if (!strcmp(cmd.arg, "radar")) rawStart(RAW_RADAR, cmd.num, now);
+#if ENABLE_LIDAR
+            else if (!strcmp(cmd.arg, "lidar")) rawStart(RAW_LIDAR, cmd.num, now);
+            else if (cmd.arg[0] == '\0') Serial.println("[raw] which one? raw radar [N] | raw lidar [N]");
+#else
+            else if (cmd.arg[0] == '\0') rawStart(RAW_RADAR, cmd.num, now);
+            else if (!strcmp(cmd.arg, "lidar")) Serial.println("[raw] this build has ENABLE_LIDAR 0");
+#endif
+            else Serial.printf("[raw] unknown source '%s'\n", cmd.arg);
+            break;
+        case CON_SUBS:
+            printSubs(now);
+            break;
+        case CON_WIFI:
+            printWifi();
+            break;
+        case CON_RECONFIG:
+            Serial.println("[radar] re-sending the configuration on request");
+            radarConfigStart(now);
+            break;
+        case CON_LOG:
+            if (!strcmp(cmd.arg, "off")) logEnabled = false;
+            else if (!strcmp(cmd.arg, "on")) logEnabled = true;
+            Serial.printf("[log] periodic statistics %s\n", logEnabled ? "on" : "off");
+            break;
+        case CON_REBOOT:
+            Serial.println("[boot] restarting");
+            Serial.flush();
+            ESP.restart();
+            break;
+        case CON_UNKNOWN:
+            Serial.printf("unknown command '%s'; %s\n", cmd.raw, CONSOLE_HELP);
+            break;
+        default:
+            break;
+    }
+}
+
+static void pollConsole(uint32_t now) {
+    ConsoleCommand cmd;
+    for (int budget = 64; budget > 0 && Serial.available() > 0; budget--) {
+        if (console.feed((char)Serial.read(), cmd)) runCommand(cmd, now);
+    }
 }
 
 /* -------------------------------------------------------------------- LED */
@@ -373,7 +601,7 @@ void setup() {
 
     radarConfigStart(millis());
     lastStatusMs = lastDebugMs = millis();
-    Serial.println("[boot] ready; waiting for receivers to say HELLO");
+    Serial.println("[boot] ready; waiting for receivers to say HELLO. Type ? for the serial console (diag, raw, subs, wifi)");
 }
 
 /* ------------------------------------------------------------------- loop */
@@ -384,14 +612,19 @@ void loop() {
 
     pollHello(now);
     subscriberExpire(now);
+    pollConsole(now);
 
     radarConfigRun(now);
     readRadar(now);
 #if ENABLE_LIDAR
     readLidar(now);
 #endif
+    rawRun(now);
 
     if ((now - lastStatusMs) >= 1000) { lastStatusMs = now; sendStatus(now); }
-    if ((now - lastDebugMs) >= DEBUG_INTERVAL_MS) { lastDebugMs = now; printDebug(now); }
+    if ((now - lastDebugMs) >= DEBUG_INTERVAL_MS) {
+        lastDebugMs = now;
+        if (logEnabled && !rawCapturing && !rawDumping) printDebug(now);   /* keep a raw dump paste-clean */
+    }
     updateLed(now);
 }
