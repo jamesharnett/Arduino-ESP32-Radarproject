@@ -153,7 +153,7 @@ hobby part; the exact vendor does not matter.
 | 1 | 5 V boost or power-bank module (see power options) | 2–5 | or a second MT3608 set to 7.0–7.5 V |
 | 1 | Passive piezo buzzer module, 3-pin | 2 | passive, not active |
 | 1 | Toggle switch, battery indicator, 220 µF capacitor | 4 | |
-| – | Enclosure prints, inserts, screws, magnets | 10 | |
+| – | Enclosure prints, M3 heat-set inserts and M3 × 8 screws (lid), M2.5 × 8 screws and nuts (LD19), magnets | 10 | |
 | | **Subtotal** | **~180** | |
 
 ### uConsole viewer
@@ -495,20 +495,30 @@ Measured bounding boxes:
 | `bottom radarmodule.stl` | 47 × 6 × 67 | radar node base plate |
 
 They fit the Level 1 radar node and the GIGA display. For Level 2 there is a
-**parametric OpenSCAD draft**, `CAD files/level2_sensor_node.scad` (with rendered
-`level2_sensor_node_base.stl` / `_lid.stl` and a preview image): a 78 × 100 × 32 mm
-box for the XIAO, RD-03D, boost, charger and a pouch cell, with the LD19 bolted
-on the lid. It was designed from datasheet dimensions and has not been printed;
-measure your parts and read `CAD files/README.md` before printing. Check the GIGA
-body in your slicer before printing: the board is 101.5 mm long inside a 105 mm body.
+**parametric OpenSCAD model**, `CAD files/level2_sensor_node.scad` (rendered
+`level2_sensor_node_base.stl` / `_lid.stl`, two test coupons, a 1:1 paper
+template and preview images): an 80.8 × 89.8 × 56.5 mm box with the RD-03D
+standing upright behind a 1.0 mm radar window, the LD19 bolted onto the lid on
+its three mounting ears, and pockets for the XIAO, boost, charger, indicator,
+switch and a pouch cell (the box grows with the cell you select). The LD19 ear
+pattern, the RD-03D outline and posture and the radar-window rules come from the
+manufacturers' drawings and are checked numerically after every render; the
+smaller modules are from seller listings and marked MEASURE. Nothing has been
+printed yet: `CAD files/README.md` gives the print order, starting with the paper
+template and a ten-minute coupon that proves the LD19 fit before the lid is
+printed. Check the GIGA body in your slicer before printing: the board is
+101.5 mm long inside a 105 mm body.
+
+![Level 2 sensor node enclosure](CAD%20files/level2_sensor_node_preview.png)
 
 -------------------------------------------------------------------------------
 
 ## Roadmap
 
-1. **Level 2 enclosure**: a parametric OpenSCAD draft exists (`CAD files/`); it
-   still needs a measured LD19 hole pattern, a test print and a pocket for a
-   ≥ 3000 mAh cell.
+1. **Level 2 enclosure**: the OpenSCAD model in `CAD files/` now has the LD19's
+   real three-ear pattern, the radar upright behind a proper window and cell
+   presets up to 6000 mAh; it still needs the MEASURE parameters confirmed
+   against real modules and a first print (template and coupons first).
 2. ~~Intrusion logic on the uConsole~~ — done (*Intrusion detection*), including
    ignore zones, scheduled arming and alert snapshots.
 3. ~~Off-site viewing~~ — done (*Off-site viewing: the relay*). The 4G module and
