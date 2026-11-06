@@ -58,7 +58,7 @@ class Installer(unittest.TestCase):
         text = desktop.read_text()
         self.assertIn("radar_viewer.py --node 192.168.4.1", text)
         self.assertIn(f"Path={UCONSOLE}", text)
-        self.assertIn("apt-get install -y --no-install-recommends python3 python3-pygame python3-numpy iw network-manager", log)
+        self.assertIn("apt-get install -y --no-install-recommends python3 python3-pygame python3-numpy python3-serial iw network-manager", log)
         self.assertIn("nmcli con add type wifi con-name RadarSystem ifname wlan0 ssid RadarSystem", log)
         self.assertIn("ipv4.never-default yes", log)
         self.assertIn("802-11-wireless.powersave 2", log)

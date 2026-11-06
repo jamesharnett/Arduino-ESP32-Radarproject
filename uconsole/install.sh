@@ -114,7 +114,7 @@ if [ ! -f "$HERE/radar_viewer.py" ]; then echo "run this from the repository's u
 if [ "$DO_APT" = 1 ]; then
   say "packages"
   if have apt-get; then
-    pkgs=(python3 python3-pygame python3-numpy iw)
+    pkgs=(python3 python3-pygame python3-numpy python3-serial iw)   # all preinstalled on the official uConsole image
     if [ "$DO_WIFI" = 1 ]; then pkgs+=(network-manager); fi
     as_root apt-get install -y --no-install-recommends "${pkgs[@]}"
     STEPS_DONE+=("packages: ${pkgs[*]}")

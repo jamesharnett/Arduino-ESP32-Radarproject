@@ -127,7 +127,7 @@ hobby part; the exact vendor does not matter.
 | 1 | Seeed Studio XIAO ESP32-S3 (plain, not Sense) | 7.5 | attach the included u.FL antenna |
 | 1 | Ai-Thinker RD-03D 24 GHz radar module | 7 | 5 V supply, 3.3 V UART, 1.25 mm 4-pin cable usually included |
 | 1 | MT3608 step-up converter module | 1.5 | trimmed to 5.0 V, feeds the sensors only |
-| 1 | TP4056/BW4056 USB-C charger module with protection (DW01) | 1 | one per cell |
+| 1 | TP4056 USB-C charger module with protection (DW01A + FS8205A; sold under several "4056" markings) | 1 | one per cell; 28 × 17.3 mm |
 | 1 | 3.7 V LiPo, 1300 mAh (602560 fits the v1 case) | 8 | about 4 h radar-only |
 | 1 | Mini toggle switch | 1.2 | |
 | 1 | 1S Li-ion 4-LED battery indicator board | 2 | optional, wires across the cell |
@@ -140,7 +140,7 @@ hobby part; the exact vendor does not matter.
 | Qty | Part | ~USD | Notes |
 |---:|---|---:|---|
 | 1 | LDROBOT LD19 / D300 / D500 kit (same sensor family) | 70–105 | 5 V, 180 mA typical (300 mA at start), 3.3 V UART TX |
-| 1 | Larger LiPo, ≥ 3000 mAh (e.g. 2 × 18650 in parallel or a 103450 pouch) | 10–15 | about 4 h with both sensors; the 1300 mAh cell gives under 2 h |
+| 1 | Larger LiPo, ≥ 3000 mAh (e.g. a 606090 pouch: 6 × 60 × 90 mm, 4000 mAh, or 2 × 18650 in parallel; a 103450 pouch is only 1800–2000 mAh) | 10–15 | about 4 h with both sensors; the 1300 mAh cell gives under 2 h |
 
 ### GIGA display unit
 
@@ -149,7 +149,7 @@ hobby part; the exact vendor does not matter.
 | 1 | Arduino GIGA R1 WiFi | 73–80 | attach the included u.FL antenna; no antenna on the board |
 | 1 | Arduino GIGA Display Shield | 64 | 800×480 touch |
 | 1 | 3.7 V LiPo ≥ 5000 mAh (1160100 fits the v1 case) | 18 | about 6 h |
-| 1 | TP4056/BW4056 USB-C charger module | 1 | |
+| 1 | TP4056 USB-C charger module with protection | 1 | |
 | 1 | 5 V boost or power-bank module (see power options) | 2–5 | or a second MT3608 set to 7.0–7.5 V |
 | 1 | Passive piezo buzzer module, 3-pin | 2 | passive, not active |
 | 1 | Toggle switch, battery indicator, 220 µF capacitor | 4 | |
@@ -175,11 +175,11 @@ laptop with Wi-Fi and Python 3.9+ runs the same viewer.
 ### Sensor node
 
 ```
- LiPo ──▶ BW4056 B+/B- ──▶ OUT+/OUT- ──▶ toggle switch ──┬──▶ XIAO BAT+ / BAT- pads (back of the board)
+ LiPo ──▶ TP4056 B+/B- ──▶ OUT+/OUT- ──▶ toggle switch ──┬──▶ XIAO BAT+ / BAT- pads (back of the board)
                                                           │
                                                           └──▶ MT3608 IN ──▶ OUT trimmed to 5.0 V ──┬──▶ RD-03D VCC
                                                                  (220 µF + 10 µF across OUT)        └──▶ LD19 P5V
- All grounds meet at the BW4056 OUT- (the protection IC switches the negative rail).
+ All grounds meet at the TP4056 module's OUT- (the protection IC switches the negative rail).
 ```
 
 Trim the MT3608 to 5.0 V with a meter **before** connecting the sensors.
@@ -206,7 +206,7 @@ expected the XIAO to charge that cell over USB, which cannot work through a
 boost converter. The cell now sits directly on the BAT pads as designed and the
 boost feeds only the two 5 V sensors.
 
-Charging: either through the BW4056's USB-C (1 A, set its Rprog to ~2 kΩ for a
+Charging: either through the TP4056 module's USB-C (1 A, set its Rprog to ~2 kΩ for a
 1300 mAh cell) or through the XIAO's USB-C (100 mA, slow). Never both at once.
 Switch the battery off while flashing over USB.
 
@@ -229,9 +229,9 @@ seen from above; point that ear the same way as the radar and
 
 Power, pick one:
 
-* **A (simplest):** LiPo → BW4056 → switch → 5 V boost / power-bank module →
+* **A (simplest):** LiPo → TP4056 module → switch → 5 V boost / power-bank module →
   the GIGA's **USB-C** port. Avoids the VIN minimum and any trimming.
-* **B:** LiPo → BW4056 → switch → MT3608 trimmed to **7.0–7.5 V** (not the 6.0 V
+* **B:** LiPo → TP4056 module → switch → MT3608 trimmed to **7.0–7.5 V** (not the 6.0 V
   of the v1 README: 6 V is the bottom of the 6–24 V VIN range and browns out as
   the cell sags) → GIGA `VIN`, with 220 µF across the converter output.
 
@@ -304,13 +304,23 @@ NetworkManager profile for the node's network with `ipv4.never-default yes`
 (the node has no internet, so any LTE or other uplink stays the default route),
 `802-11-wireless.powersave 2` (off: a sleeping Wi-Fi client delays and drops
 the small UDP datagrams) and endless autoconnect retries, installs
-`python3-pygame python3-numpy iw` with apt, and optionally the viewer autostart
+`python3-pygame python3-numpy python3-serial iw` with apt (all preinstalled on the
+official uConsole image), and optionally the viewer autostart
 entry (`~/.config/autostart/radar-viewer.desktop`) or the relay systemd service.
 Without NetworkManager do the same by hand: join the network, set the route
 preference and `iw dev wlan0 set power_save off`. `doctor.py` then checks the
 Python modules, the graphical session, the active network, the address and
 route, power save, the firewall, whether UDP 4210 is free, and finally sends a
 HELLO to the node and prints the STATUS it answers with.
+
+What to expect from the uConsole itself (official CM4 image v3.1, April 2026):
+it is a 64-bit Raspberry Pi OS Trixie build with the labwc Wayland desktop,
+NetworkManager, Python 3.13 and `python3-pygame`, `python3-numpy` and
+`python3-serial` already installed; the 1280 × 720 screen matches the viewer's
+default window; XDG autostart entries are honoured, which is what the installer
+relies on; the keyboard has Esc, the arrow keys and every letter the viewer
+uses, with the F-keys on the Fn layer. Wi-Fi power saving is a known cause of
+dropouts on it, hence the profile setting above.
 
 Keys: `UP/DOWN` zoom (2/4/8/12 m), `M` mute, `L` LIDAR on/off, `F` fullscreen,
 `A` arm/disarm intrusion detection, `B` learn the empty-room baseline (10 s),
@@ -373,7 +383,10 @@ python3 radar_viewer.py --node <uConsole address> --windowed
 Remote viewers send their `HELLO` to the relay instead of the node; the relay
 forwards every RADAR/LIDAR/STATUS datagram unchanged, so the sensor node never
 has to be reachable from outside its own network. For true off-site use put the
-uConsole on the internet through its 4G module (`uconsole-4g-cm4 enable`) and
+uConsole on the internet through its 4G module (`uconsole-4g-cm4 enable`, made
+permanent with `sudo systemctl enable --now uconsole-4g-cm4`, then a
+NetworkManager GSM connection: `sudo nmcli c add type gsm ifname ttyUSB2
+con-name 4gnet apn <your apn>` and `sudo nmcli c up 4gnet`) and
 join it to a [Tailscale](https://tailscale.com/download/linux) tailnet; the
 relay's UDP and web ports are then reachable only from your own devices. The web
 view's arm/disarm/learn buttons are protected by `--web-token`; the plot itself
@@ -528,7 +541,7 @@ Firmware and documentation were audited before this rewrite. Fixed here:
 * Corrected power wiring (cell on the XIAO BAT pads, boost only for the sensors,
   GIGA via USB-C or 7–7.5 V VIN), antennas and buzzer voltage documented.
 * README paths, enclosure file names and sizes, the GIGA's real AP address in
-  the v1 design (192.168.3.1, not 192.168.4.1), BW4056/TP4056 naming, stale
+  the v1 design (192.168.3.1, not 192.168.4.1), charger module naming (TP4056; "BW4056" is not a part), stale
   "R4" labels.
 * Sentinel-speed filter, clustering keeps the faster speed, `fb[12]` overflow
   after 10⁸ frames gone, toolchain versions pinned, tests added.
