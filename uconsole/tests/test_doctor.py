@@ -87,6 +87,41 @@ class MockedSystem(unittest.TestCase):
         self.assertIn(("route", "INFO"), levels(d))                      # the node is the only default route
         self.assertIn(("firewall", "OK"), levels(d))                     # ufw missing
 
+    def test_ufw_needs_root_and_backslash_ssid(self):
+        d = self.doctor({"nmcli -t -f ACTIVE": (0, "yes:Radar\\\\:72:6:wlan0\n"), "nmcli -t -f NAME": (0, "Radar\\\\\n"),
+                         "ip -j -4 addr": (0, IP_ADDR_OK), "ip -j route": (0, IP_ROUTE_OTHER),
+                         "ufw status": (1, "ERROR: You need to be root to run this script\n"),
+                         "sudo -n ufw status": (1, "sudo: a password is required\n")}, ssid="Radar\\")
+        fw = [c for c in d.checks if c.name == "firewall"][0]
+        self.assertEqual(fw.level, "INFO")                               # not a false OK
+        self.assertIn("sudo ufw status", fw.fix)
+        wifi = [c for c in d.checks if c.name == "wifi"][0]
+        self.assertEqual(wifi.level, "OK", wifi.text)                    # "Radar\\" matched despite the escaping
+        self.assertEqual(dr.nmcli_fields("yes:Radar\\:Net:72:6"), ["yes", "Radar:Net", "72", "6"])
+        self.assertEqual(dr.nmcli_fields("a\\\\:b"), ["a\\", "b"])
+
+    def test_missing_interface_and_text_routes(self):
+        d = self.doctor({"nmcli -t -f ACTIVE": (0, NMCLI_WIFI_OK), "nmcli -t -f NAME": (0, "RadarSystem\n"),
+                         "ip -j -4 addr": (1, 'Device "wlan0" does not exist.\n'),
+                         "ip -j route": (1, 'Option "-j" is unknown, try "ip -help".\n'),
+                         "ip route show default": (0, "default via 192.168.4.1 dev wlan0 proto dhcp\n")})
+        addr = [c for c in d.checks if c.name == "address"][0]
+        self.assertEqual(addr.level, "FAIL")
+        self.assertIn("does not exist", addr.text)
+        route = [c for c in d.checks if c.name == "route"][0]
+        self.assertIn("the sensor node is the default route", route.text)   # parsed from the text fallback
+        d = self.doctor({"nmcli -t -f ACTIVE": (0, NMCLI_WIFI_OK), "nmcli -t -f NAME": (0, "RadarSystem\n"), "ip -j -4 addr": (0, IP_ADDR_OK),
+                         "ip -j route": (0, '[{"dst":"default","nexthops":[{"gateway":"192.168.4.1","dev":"wlan0"},{"gateway":"10.0.0.1","dev":"wwan0"}]}]')})
+        route = [c for c in d.checks if c.name == "route"][0]
+        self.assertEqual(route.level, "WARN")                            # the node is one of two default hops
+
+    def test_info_does_not_spoil_the_verdict(self):
+        d = dr.Doctor(runner=make_runner({}))
+        d.add("OK", "x", "fine"); d.add("INFO", "y", "note")
+        self.assertEqual(d.worst, "OK")
+        d.add("WARN", "z", "hmm")
+        self.assertEqual(d.worst, "WARN")
+
     def test_no_address(self):
         d = self.doctor({"nmcli -t -f ACTIVE": (0, "no:RadarSystem:72:6:wlan0\n"), "nmcli -t -f NAME": (0, "RadarSystem\n"),
                          "ip -j -4 addr": (0, '[{"ifname":"wlan0","addr_info":[]}]'), "ip -j route": (0, "[]")})

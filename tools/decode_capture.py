@@ -9,7 +9,7 @@ binary file (``--binary``, e.g. ``tools/sensor_probe.py --save``).
     python3 tools/decode_capture.py capture.txt
     python3 tools/decode_capture.py --sensor lidar --verbose capture.txt
     python3 tools/decode_capture.py --binary --sensor radar probe.bin
-    tail -f serial.log | python3 tools/decode_capture.py -        # decodes when the paste is complete (Ctrl-D)
+    python3 tools/decode_capture.py -                              # paste the hex, then press Ctrl-D
 
 The output is a summary (frames found, corrupt frames, bytes outside frames,
 the module's configuration replies, which target slots were used), a line per

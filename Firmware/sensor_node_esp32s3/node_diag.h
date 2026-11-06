@@ -188,7 +188,7 @@ static inline void diagLidar(const DiagInput &in, DiagLine *out, size_t &n, size
         return;
     }
     if (in.lidar_speed_deg_s < DIAG_LIDAR_SPEED_MIN || in.lidar_speed_deg_s > DIAG_LIDAR_SPEED_MAX) {
-        diagEmit(out, n, max, DIAG_WARN, "lidar", "scan speed %u deg/s is outside %d..%d (3600 = 10 Hz): leave the PWM pin open, check the 5 V supply",
+        diagEmit(out, n, max, DIAG_WARN, "lidar", "scan speed %u deg/s is outside %d..%d (3600 = 10 Hz): tie the PWM pin to GND, check the 5 V supply",
                  (unsigned)in.lidar_speed_deg_s, DIAG_LIDAR_SPEED_MIN, DIAG_LIDAR_SPEED_MAX);
         return;
     }

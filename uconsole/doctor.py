@@ -32,14 +32,37 @@ LEVELS = ("OK", "INFO", "WARN", "FAIL")
 RunResult = Tuple[Optional[int], str]           # (exit status or None when the tool is missing, stdout+stderr)
 
 
+SBIN_PATH = os.environ.get("PATH", "") + ":/usr/sbin:/sbin:/usr/local/sbin"   # iw and ufw live in sbin on Debian
+
+
 def run_command(argv: List[str], timeout: float = 5.0) -> RunResult:
-    if shutil.which(argv[0]) is None:
+    exe = shutil.which(argv[0]) or shutil.which(argv[0], path=SBIN_PATH)
+    if exe is None:
         return None, ""
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([exe] + list(argv[1:]), capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, str(exc)
     return r.returncode, r.stdout + r.stderr
+
+
+def nmcli_fields(line: str) -> List[str]:
+    """Split one line of ``nmcli -t`` output: ':' separates fields, '\\' escapes the next character."""
+    fields, cur, i = [], [], 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and i + 1 < len(line):
+            cur.append(line[i + 1])
+            i += 2
+            continue
+        if c == ":":
+            fields.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    fields.append("".join(cur))
+    return fields
 
 
 @dataclass
@@ -68,8 +91,9 @@ class Doctor:
 
     @property
     def worst(self) -> str:
+        """The verdict: INFO lines are notes, not problems, so a healthy run says OK."""
         order = {lv: i for i, lv in enumerate(LEVELS)}
-        return max((c.level for c in self.checks), key=lambda lv: order[lv], default="OK")
+        return max((c.level for c in self.checks if c.level != "INFO"), key=lambda lv: order[lv], default="OK")
 
     def node_net(self) -> str:
         return ".".join(self.node.split(".")[:3]) + "."
@@ -111,7 +135,7 @@ class Doctor:
         rows = []
         for line in out.splitlines():
             if line.strip():
-                rows.append([f.replace("\\:", ":") for f in re.split(r"(?<!\\):", line)])
+                rows.append(nmcli_fields(line))
         return rows
 
     def check_wifi(self) -> None:
@@ -158,6 +182,10 @@ class Doctor:
     def check_address(self) -> None:
         rc, out = self.runner(["ip", "-j", "-4", "addr", "show", "dev", self.iface])
         addrs: List[str] = []
+        if rc not in (0, None) and "does not exist" in out:
+            self.add("FAIL", "address", f"interface {self.iface} does not exist on this machine",
+                     "ip link   # find the Wi-Fi interface, then: doctor.py --iface <name>")
+            return
         if rc == 0 and out.strip().startswith("["):
             try:
                 for entry in json.loads(out):
@@ -184,13 +212,18 @@ class Doctor:
         if rc is None:
             return
         gws: List[Tuple[str, str]] = []
-        if out.strip().startswith("["):
+        if rc == 0 and out.strip().startswith("["):
             try:
-                gws = [(r.get("gateway", "?"), r.get("dev", "?")) for r in json.loads(out)]
+                for r in json.loads(out):
+                    for hop in r.get("nexthops", [r]):               # multipath routes list their hops
+                        gws.append((hop.get("gateway", "-"), hop.get("dev", "?")))
             except ValueError:
                 gws = []
         else:
+            if rc != 0:                                               # iproute2 without JSON support
+                rc, out = self.runner(["ip", "route", "show", "default"])
             gws = re.findall(r"default via (\S+) dev (\S+)", out)
+            gws += [("-", d) for d in re.findall(r"default dev (\S+)", out)]
         if not gws:
             self.add("INFO", "route", "no default route: fine for the viewer; the relay needs another uplink for off-site access")
         elif any(g == self.node for g, _ in gws):
@@ -220,6 +253,14 @@ class Doctor:
         if rc is None:
             self.add("OK", "firewall", "ufw not installed; nothing blocks UDP 4210 unless you configured nftables yourself")
             return
+        if rc != 0:                                                   # ufw refuses to answer non-root users
+            rc2, out2 = self.runner(["sudo", "-n", "ufw", "status"])
+            if rc2 == 0:
+                rc, out = rc2, out2
+            else:
+                self.add("INFO", "firewall", f"cannot query ufw as this user ({out.strip().splitlines()[0][:60] if out.strip() else 'no output'}); "
+                         "if ufw is active it must allow UDP 4210", "sudo ufw status   # and if active: sudo ufw allow 4210/udp")
+                return
         if "Status: active" not in out:
             self.add("OK", "firewall", "ufw is inactive")
             return
@@ -300,7 +341,7 @@ class Doctor:
         for scope, unit in ((["--user"], "radar-viewer"), ([], "radar-relay")):
             rc, out = self.runner(["systemctl"] + scope + ["is-active", unit])
             if rc is None:
-                return
+                break
             state = out.strip().splitlines()[0] if out.strip() else "unknown"
             if rc == 0:
                 self.add("INFO", "service", f"{unit} service is {state}")

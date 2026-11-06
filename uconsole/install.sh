@@ -4,13 +4,16 @@
 #
 #   ./install.sh --ask-password                       # viewer only, join "RadarSystem"
 #   ./install.sh --ask-password --viewer-autostart    # ... and start the viewer at login
-#   ./install.sh --password 'secret' --relay --web-token s3cret   # headless relay + web view
+#   sudo ./install.sh --password 'secret' --relay --web-token s3cret   # headless relay + web view
 #   ./install.sh --dry-run ...                        # print what would be done
 #   ./install.sh --uninstall                          # remove what this script installed
 #
-# Safe to run again: every step is idempotent. Tested on Raspberry Pi OS (Bookworm)
-# with NetworkManager; on other distributions the apt and nmcli steps can be skipped
-# with --no-apt / --no-wifi and done by hand (see README, "Set up the uConsole").
+# Safe to run again: every step is idempotent. Tested on Raspberry Pi OS (Bookworm
+# and Trixie) with NetworkManager; on other distributions the apt and nmcli steps can
+# be skipped with --no-apt / --no-wifi and done by hand (see README, "Set up the
+# uConsole"). System files (the relay unit, its token file) are written through
+# sudo; user files (the autostart entry, the data directory) belong to the login
+# user even when the script itself runs under sudo.
 set -euo pipefail
 
 SSID="RadarSystem"
@@ -27,9 +30,9 @@ DO_WIFI=1
 CONNECT_NOW=0
 DRY_RUN=0
 UNINSTALL=0
-PREFIX=""                      # root for SYSTEM files such as /etc/systemd (tests); user files follow $HOME
+PREFIX=""                      # root for SYSTEM files such as /etc/systemd (tests); user files follow the user's home
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -56,12 +59,16 @@ done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 RUN_USER="${SUDO_USER:-$(id -un)}"
-USER_HOME="${HOME}"
+USER_HOME=""
+if [ -n "${SUDO_USER:-}" ]; then USER_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"; fi   # sudo resets HOME to /root
+USER_HOME="${USER_HOME:-$HOME}"
+RUN_GROUP="$(id -gn "$RUN_USER" 2>/dev/null || id -gn)"
 DATA_DIR="$USER_HOME/radarlink"
 PYTHON="$(command -v python3 || echo /usr/bin/python3)"
 AUTOSTART_DIR="$USER_HOME/.config/autostart"
 DESKTOP_FILE="$AUTOSTART_DIR/radar-viewer.desktop"
 RELAY_UNIT="$PREFIX/etc/systemd/system/radar-relay.service"
+RELAY_ENV="$PREFIX/etc/radarlink/relay.env"
 STEPS_DONE=()
 
 say()  { printf '\n== %s\n' "$*"; }
@@ -72,29 +79,45 @@ as_root() {
   elif command -v sudo >/dev/null 2>&1; then run sudo "$@"
   else echo "need root for: $*" >&2; return 1; fi
 }
+# system files: through root unless a --prefix redirects them (tests)
+sys_install() { if [ -n "$PREFIX" ]; then run install "$@"; else as_root install "$@"; fi; }
+sys_rm()      { if [ -n "$PREFIX" ]; then run rm -f "$@"; else as_root rm -f "$@"; fi; }
 have() { command -v "$1" >/dev/null 2>&1; }
-write_file() {                 # write_file PATH <<EOF ... (content on stdin)
-  local path="$1" dir
-  dir="$(dirname "$path")"
+# user files: created for the login user, owned by them even under sudo
+user_dir() {
+  if [ "$(id -u)" = 0 ] && [ "$RUN_USER" != root ]; then run install -d -o "$RUN_USER" -g "$RUN_GROUP" "$1"
+  else run mkdir -p "$1"; fi
+}
+own_user() { if [ "$(id -u)" = 0 ] && [ "$RUN_USER" != root ] && [ "$DRY_RUN" != 1 ]; then chown "$RUN_USER:$RUN_GROUP" "$1"; fi; }
+write_file() {                 # write_file PATH <<EOF ... (user file, content on stdin)
+  local path="$1"
   printf '   + write %s\n' "$path"
   if [ "$DRY_RUN" = 1 ]; then cat >/dev/null; return 0; fi
-  mkdir -p "$dir"
+  user_dir "$(dirname "$path")" >/dev/null
   cat >"$path"
+  own_user "$path"
 }
+# quoting for a Desktop Entry Exec= line: double quotes, backslash-escape \ " $ `, % doubled
+dq() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; s=${s//\$/\\\$}; s=${s//\`/\\\`}; s=${s//%/%%}; printf '"%s"' "$s"; }
+# quoting for a systemd ExecStart= line: double quotes, \ and " escaped, $ and % doubled
+sq() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; s=${s//\$/\$\$}; s=${s//%/%%}; printf '"%s"' "$s"; }
+# nmcli -t escapes ':' and '\' in names; compare literally after unescaping
+profile_exists() { nmcli -t -f NAME con show 2>/dev/null | sed 's/\\\(.\)/\1/g' | grep -qxF -- "$1"; }
 
 # ------------------------------------------------------------------ uninstall
 if [ "$UNINSTALL" = 1 ]; then
   say "removing the viewer autostart entry"
-  [ -e "$DESKTOP_FILE" ] && run rm -f "$DESKTOP_FILE" || note "not installed"
+  if [ -e "$DESKTOP_FILE" ]; then run rm -f "$DESKTOP_FILE"; else note "not installed"; fi
   say "removing the relay service"
   if [ -e "$RELAY_UNIT" ]; then
-    have systemctl && as_root systemctl disable --now radar-relay || true
-    as_root rm -f "$RELAY_UNIT"
-    have systemctl && as_root systemctl daemon-reload || true
+    if have systemctl && [ -z "$PREFIX" ]; then as_root systemctl disable --now radar-relay || true; fi
+    sys_rm "$RELAY_UNIT"
+    [ -e "$RELAY_ENV" ] && sys_rm "$RELAY_ENV"
+    if have systemctl && [ -z "$PREFIX" ]; then as_root systemctl daemon-reload || true; fi
   else note "not installed"; fi
   if [ "$DO_WIFI" = 1 ] && have nmcli; then
     say "removing the Wi-Fi profile '$SSID'"
-    if nmcli -t -f NAME con show 2>/dev/null | grep -qx -- "$SSID"; then run nmcli con delete "$SSID"; else note "no such profile"; fi
+    if profile_exists "$SSID"; then run nmcli con delete "$SSID"; else note "no such profile"; fi
   fi
   note "kept: $DATA_DIR (baseline, alert log, snapshots), apt packages, firewall rules"
   exit 0
@@ -131,9 +154,9 @@ if [ "$DO_WIFI" = 1 ]; then
     note "disable Wi-Fi power save (iw dev $IFACE set power_save off); keep your other uplink as the default route."
   else
     if [ -z "$PASSWORD" ] && [ "$ASK_PASSWORD" = 1 ]; then
-      read -rs -p "   Wi-Fi password for '$SSID' (WIFI_PASS in the node's config.h): " PASSWORD; echo
+      IFS= read -rs -p "   Wi-Fi password for '$SSID' (WIFI_PASS in the node's config.h): " PASSWORD; echo
     fi
-    if nmcli -t -f NAME con show 2>/dev/null | grep -qx -- "$SSID"; then
+    if profile_exists "$SSID"; then
       note "profile exists, updating it"
     else
       run nmcli con add type wifi con-name "$SSID" ifname "$IFACE" ssid "$SSID"
@@ -152,7 +175,11 @@ if [ "$DO_WIFI" = 1 ]; then
       note "no password given (--password / --ask-password): set it later with"
       note "  nmcli con modify '$SSID' wifi-sec.key-mgmt wpa-psk wifi-sec.psk '<WIFI_PASS>'"
     fi
-    if [ "$CONNECT_NOW" = 1 ]; then run nmcli con up "$SSID"; else note "connect with: nmcli con up '$SSID'   (or let autoconnect do it)"; fi
+    if [ "$CONNECT_NOW" = 1 ]; then
+      if ! run nmcli con up "$SSID"; then note "could not connect now (node not up yet?); autoconnect keeps retrying"; fi
+    else
+      note "connect with: nmcli con up '$SSID'   (or let autoconnect do it)"
+    fi
     STEPS_DONE+=("Wi-Fi profile $SSID (never-default, power save off, autoconnect)")
   fi
 fi
@@ -165,7 +192,7 @@ if [ "$VIEWER_AUTOSTART" = 1 ]; then
 Type=Application
 Name=RadarLink viewer
 Comment=Radar and LIDAR view of the sensor node $NODE_IP
-Exec=$PYTHON $HERE/radar_viewer.py --node $NODE_IP
+Exec=$(dq "$PYTHON") $(dq "$HERE/radar_viewer.py") --node $NODE_IP
 Path=$HERE
 Terminal=false
 X-GNOME-Autostart-enabled=true
@@ -177,10 +204,17 @@ fi
 # ------------------------------------------------------------------- relay
 if [ "$RELAY" = 1 ]; then
   say "relay service (headless: alarm daemon, web view on port $WEB_PORT, re-serves remote viewers)"
-  run mkdir -p "$DATA_DIR"
-  token_opt=""
-  [ -n "$WEB_TOKEN" ] && token_opt=" --web-token $WEB_TOKEN"
-  write_file "$RELAY_UNIT" <<UNIT
+  user_dir "$DATA_DIR"
+  env_line=""
+  if [ -n "$WEB_TOKEN" ]; then
+    # the token stays out of the unit file and the process list: root-only env file
+    tmp_env="$(mktemp)"; printf 'RADAR_WEB_TOKEN=%s\n' "$WEB_TOKEN" >"$tmp_env"
+    printf '   + write %s (mode 0600, holds the web token)\n' "$RELAY_ENV"
+    sys_install -D -m 0600 "$tmp_env" "$RELAY_ENV"; rm -f "$tmp_env"
+    env_line="EnvironmentFile=$RELAY_ENV"
+  fi
+  tmp_unit="$(mktemp)"
+  cat >"$tmp_unit" <<UNIT
 # generated by uconsole/install.sh; edit and run: sudo systemctl daemon-reload && sudo systemctl restart radar-relay
 [Unit]
 Description=RadarLink relay, alarm daemon and web view
@@ -190,14 +224,17 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$RUN_USER
-WorkingDirectory=$HERE
-ExecStart=$PYTHON $HERE/radar_relay.py --node $NODE_IP --web $WEB_PORT$token_opt --armed --baseline $DATA_DIR/baseline.json --alert-log $DATA_DIR/alerts.log --snapshot-dir $DATA_DIR/snapshots
+WorkingDirectory=$(sq "$HERE")
+${env_line}
+ExecStart=$(sq "$PYTHON") $(sq "$HERE/radar_relay.py") --node $NODE_IP --web $WEB_PORT --armed --baseline $(sq "$DATA_DIR/baseline.json") --alert-log $(sq "$DATA_DIR/alerts.log") --snapshot-dir $(sq "$DATA_DIR/snapshots")
 Restart=on-failure
 RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 UNIT
+  printf '   + write %s\n' "$RELAY_UNIT"
+  sys_install -D -m 0644 "$tmp_unit" "$RELAY_UNIT"; rm -f "$tmp_unit"
   if have systemctl && [ -z "$PREFIX" ]; then
     as_root systemctl daemon-reload
     as_root systemctl enable --now radar-relay
@@ -219,7 +256,7 @@ if have ufw; then
     [ "$RELAY" = 1 ] && as_root ufw allow "$WEB_PORT/tcp" comment "RadarLink web view"
     STEPS_DONE+=("ufw rules")
   else
-    note "ufw is inactive, nothing to do"
+    note "ufw is inactive (or not queryable without root), nothing to do"
   fi
 fi
 

@@ -336,7 +336,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--node-port", type=int, default=rp.PORT, help="sensor node UDP port")
     p.add_argument("--serve-port", type=int, default=rp.PORT, help="UDP port remote viewers send HELLO to (0 = ephemeral)")
     p.add_argument("--web", type=int, metavar="PORT", help="serve the web view on this TCP port (0 = ephemeral)")
-    p.add_argument("--web-token", metavar="TOKEN", help="require ?token=TOKEN on the arm/disarm/learn endpoints")
+    p.add_argument("--web-token", metavar="TOKEN", default=os.environ.get("RADAR_WEB_TOKEN"),
+                   help="require ?token=TOKEN on the arm/disarm/learn endpoints (default: $RADAR_WEB_TOKEN, which keeps it out of the process list)")
     p.add_argument("--offset", type=float, default=0.0, help="LIDAR mounting angle offset in degrees (same as the viewer)")
     p.add_argument("--no-still-filter", action="store_true", help="keep radar targets that stopped moving")
     p.add_argument("--max-seconds", type=float, default=0.0, help="exit after this long (testing)")

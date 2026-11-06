@@ -304,11 +304,14 @@ NetworkManager profile for the node's network with `ipv4.never-default yes`
 (the node has no internet, so any LTE or other uplink stays the default route),
 `802-11-wireless.powersave 2` (off: a sleeping Wi-Fi client delays and drops
 the small UDP datagrams) and endless autoconnect retries, installs
-`python3-pygame python3-numpy python3-serial iw` with apt (all preinstalled on the
-official uConsole image), and optionally the viewer autostart
-entry (`~/.config/autostart/radar-viewer.desktop`) or the relay systemd service.
-Without NetworkManager do the same by hand: join the network, set the route
-preference and `iw dev wlan0 set power_save off`. `doctor.py` then checks the
+`python3 python3-pygame python3-numpy python3-serial iw` and `network-manager`
+with apt (all preinstalled on the official uConsole image; `--no-apt` skips
+this), and optionally the viewer autostart entry
+(`~/.config/autostart/radar-viewer.desktop`) or the relay systemd service, whose
+web token goes into a root-only file rather than the command line.
+Without NetworkManager run it with `--no-wifi` and do that part by hand: join
+the network, set the route preference and `iw dev wlan0 set power_save off`.
+`doctor.py` then checks the
 Python modules, the graphical session, the active network, the address and
 route, power save, the firewall, whether UDP 4210 is free, and finally sends a
 HELLO to the node and prints the STATUS it answers with.

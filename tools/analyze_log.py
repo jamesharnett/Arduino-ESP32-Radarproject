@@ -389,7 +389,7 @@ def analyze_node(log: TextLog, rep: Report) -> None:
                 if crc_pct > LIDAR_CRC_PCT_MAX:
                     rep.say("WARN", f"lidar: {crc_pct:.1f}% CRC errors: supply ripple or a long unshielded lead")
                 if sp and (statistics.median(sp) < LIDAR_SPEED_MIN or statistics.median(sp) > LIDAR_SPEED_MAX):
-                    rep.say("WARN", f"lidar: scan speed median {statistics.median(sp):g} deg/s outside {LIDAR_SPEED_MIN}..{LIDAR_SPEED_MAX}: PWM pin open? supply?")
+                    rep.say("WARN", f"lidar: scan speed median {statistics.median(sp):g} deg/s outside {LIDAR_SPEED_MIN}..{LIDAR_SPEED_MAX}: PWM pin tied to GND? supply?")
                 if lmed < LIDAR_FPS_MIN:
                     rep.say("WARN", f"lidar: median {lmed:g} frames/s (expect ~375): frames lost, usually a stalled USB serial host blocking the loop")
                 lp_med = statistics.median(lp) if lp else 0

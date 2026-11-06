@@ -47,7 +47,7 @@ Radar: one line per frame with the targets the node would forward (position,
 range, speed) or `no target` when nothing moves, and with `--configure` the
 module's replies to the three configuration commands (adapter TX to module RX
 needed for that). LIDAR: once a second `lidar: 375 frames/s, 0 CRC errors,
-speed field 3580..3620 deg/s`. Both end with the same summary and hints as
+speed field 3580..3620 deg/s, 18800 bytes so far`. Both end with the same summary and hints as
 `decode_capture.py` below. `--save file.bin` keeps the raw bytes, `--hex`
 prints them like the node does. Adapters known to do 256000 baud: CP2102,
 CH340, FT232; the LD19's 230400 works everywhere.

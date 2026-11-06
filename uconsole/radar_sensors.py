@@ -532,7 +532,7 @@ def analyze_capture(data: bytes, sensor: str) -> CaptureReport:
         if p2.crc_errors * 50 > p2.frames:
             hints.append(f"{p2.crc_errors} CRC errors in {p2.frames + p2.crc_errors} frames: supply ripple, a long lead, or dropped bytes")
         if rep.lidar_speed_max < 2500 or rep.lidar_speed_min > 4700:
-            hints.append("scan speed outside 2500..4700 deg/s: the PWM pin should be left open (10 Hz default), check the 5 V supply")
+            hints.append("scan speed outside 2500..4700 deg/s: tie the PWM pin to GND (10 Hz self-regulation), check the 5 V supply")
         if rep.lidar_points and rep.lidar_zero_points * 10 >= rep.lidar_points * 9:
             hints.append("almost no returns: the LIDAR is covered, facing beyond 12 m, or looking at black/glass surfaces")
     else:
