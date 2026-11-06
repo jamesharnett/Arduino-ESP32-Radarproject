@@ -124,6 +124,11 @@ class Rd03dPython(unittest.TestCase):
         f = sn.Rd03dFrame(sn.rd03d_build_frame([(500, 2000, 248), (-500, 2000, -256), (0, 3000, 0)])[4:28])
         self.assertFalse(any(x.valid for x in sn.rd03d_process(f)))
         self.assertTrue(all(x.valid for x in sn.rd03d_process(f, sn.Rd03dOptions(filter_sentinels=False))))
+        # single-precision distance gate: these pairs sum to 64 000 001 in double but
+        # round to 64 000 000 in float, so the node keeps them and the mirror must too
+        f = sn.Rd03dFrame(sn.rd03d_build_frame([(1, 8000, 50), (799, 7960, 50), (3076, 7385, 50)])[4:28])
+        self.assertTrue(all(x.valid for x in sn.rd03d_process(f, sn.Rd03dOptions(cluster_dist_mm=0))))
+        self.assertFalse(sn.rd03d_process(sn.Rd03dFrame(sn.rd03d_build_frame([(2, 8000, 50)])[4:28]))[0].valid)
         # C truncation toward zero when averaging negative coordinates
         f = sn.Rd03dFrame(sn.rd03d_build_frame([(-501, 2000, 30), (-600, 2300, 10)])[4:28])
         self.assertEqual(sn.rd03d_process(f)[0].x_mm, -550)
@@ -201,6 +206,10 @@ class HexDumpAndAnalysis(unittest.TestCase):
                             + sn.format_hex_lines(frame, "[raw radar] ", 16) + ["[raw radar] end"])
         src, data = sn.parse_hex_dump(console)
         self.assertEqual((src, data), ("radar", frame))
+        stamped = "\n".join("12:34:56.789 -> " + l for l in console.splitlines())      # Arduino IDE "Show timestamp"
+        self.assertEqual(sn.parse_hex_dump(stamped), ("radar", frame))
+        stamped = "\n".join("[12:34:56] " + l for l in console.splitlines())
+        self.assertEqual(sn.parse_hex_dump(stamped), ("radar", frame))
         src, data = sn.parse_hex_dump("0xAA, 0xFF, 0x03, 0x00,\n0x55,0xCC // comment")
         self.assertEqual((src, data), (None, bytes((0xAA, 0xFF, 0x03, 0x00, 0x55, 0xCC))))
         src, data = sn.parse_hex_dump("aaff0300\n55cc\n")

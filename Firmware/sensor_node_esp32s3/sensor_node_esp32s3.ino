@@ -118,7 +118,7 @@ static uint8_t     rawBuf[RAW_CAPTURE_MAX];
 static size_t      rawLen = 0, rawTarget = 0, rawDumpPos = 0;
 static RawSource   rawSource = RAW_NONE;
 static bool        rawCapturing = false, rawDumping = false;
-static uint32_t    rawStartMs = 0, rawEndMs = 0;
+static uint32_t    rawStartMs = 0, rawEndMs = 0, rawDeadlineMs = 0;
 
 /* timing */
 static uint32_t lastStatusMs = 0, lastDebugMs = 0;
@@ -227,8 +227,12 @@ static void rawStart(RawSource source, long n, uint32_t now) {
     rawCapturing = true;
     rawDumping = false;
     rawStartMs = now;
-    Serial.printf("[raw %s] capturing %u bytes (gives up after %u ms) ...\n",
-                  rawSourceName(), (unsigned)rawTarget, (unsigned)RAW_CAPTURE_TIMEOUT_MS);
+    /* The radar streams only 300 bytes/s (10 frames of 30 bytes), the LD19 about
+     * 17.6 kB/s: allow 1.5x the time a healthy sensor needs, plus the base timeout. */
+    uint32_t perByteUs = (source == RAW_RADAR) ? 5000 : 85;
+    rawDeadlineMs = RAW_CAPTURE_TIMEOUT_MS + (uint32_t)((uint64_t)rawTarget * perByteUs / 1000);
+    Serial.printf("[raw %s] capturing %u bytes (gives up after %lu ms) ...\n",
+                  rawSourceName(), (unsigned)rawTarget, (unsigned long)rawDeadlineMs);
 }
 
 static inline void rawFeed(RawSource source, uint8_t c, uint32_t now) {
@@ -238,14 +242,23 @@ static inline void rawFeed(RawSource source, uint8_t c, uint32_t now) {
 }
 
 static void rawRun(uint32_t now) {
-    if (rawCapturing && (now - rawStartMs) > RAW_CAPTURE_TIMEOUT_MS) {
-        Serial.printf("[raw %s] timed out with %u of %u bytes: that UART is (nearly) silent\n",
-                      rawSourceName(), (unsigned)rawLen, (unsigned)rawTarget);
+    if (rawCapturing && (now - rawStartMs) > rawDeadlineMs) {
+        if (rawLen == 0)
+            Serial.printf("[raw %s] timed out with no byte at all: that UART is silent\n", rawSourceName());
+        else
+            Serial.printf("[raw %s] timed out with %u of %u bytes: data arrives, but slower than a healthy sensor\n",
+                          rawSourceName(), (unsigned)rawLen, (unsigned)rawTarget);
         rawFinish(now);
     }
     if (!rawDumping) return;
+    /* The USB CDC transmit ring (SERIAL_TX_BUFFER bytes) only drains when the host
+     * reads, and with a 0 ms TX timeout a line that does not fit is dropped, not
+     * queued. So print a line only when there is room for it; the dump just takes
+     * more loop passes. */
     char line[RAW_DUMP_BYTES_PER_LINE * 3 + 1];
+    const int lineRoom = (int)sizeof(line) + 16;
     for (int lines = 0; lines < RAW_DUMP_LINES_PER_LOOP && rawDumpPos < rawLen; lines++) {
+        if (Serial.availableForWrite() < lineRoom) return;
         size_t n = rawLen - rawDumpPos;
         if (n > RAW_DUMP_BYTES_PER_LINE) n = RAW_DUMP_BYTES_PER_LINE;
         for (size_t i = 0; i < n; i++) snprintf(line + 3 * i, 4, "%02X ", rawBuf[rawDumpPos + i]);
@@ -253,7 +266,7 @@ static void rawRun(uint32_t now) {
         Serial.printf("[raw %s] %s\n", rawSourceName(), line);
         rawDumpPos += n;
     }
-    if (rawDumpPos >= rawLen) {
+    if (rawDumpPos >= rawLen && Serial.availableForWrite() >= lineRoom) {
         rawDumping = false;
         Serial.printf("[raw %s] end\n", rawSourceName());
     }
@@ -515,6 +528,9 @@ static void runCommand(const ConsoleCommand &cmd, uint32_t now) {
             break;
         case CON_REBOOT:
             Serial.println("[boot] restarting");
+#if ARDUINO_USB_CDC_ON_BOOT
+            Serial.setTxTimeoutMs(100);           /* flush() with a 0 ms timeout discards the queue; blocking is fine here */
+#endif
             Serial.flush();
             ESP.restart();
             break;
@@ -568,6 +584,11 @@ static void startAccessPoint(uint32_t now) {
 /* ------------------------------------------------------------------ setup */
 void setup() {
     pinMode(STATUS_LED_PIN, OUTPUT);
+#if ARDUINO_USB_CDC_ON_BOOT
+    /* The USB CDC transmit ring defaults to 256 bytes, less than one diag reply;
+     * size it so a whole multi-line answer and a few hex lines queue at once. */
+    Serial.setTxBufferSize(SERIAL_TX_BUFFER);
+#endif
     Serial.begin(DEBUG_BAUD);
 #if ARDUINO_USB_CDC_ON_BOOT
     /* A host that opened the port and then stopped reading (monitor closed, PC

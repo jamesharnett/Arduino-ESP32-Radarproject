@@ -93,25 +93,7 @@ def bars(rows: List[Tuple[str, float]], width: int = 40, unit: str = "") -> List
     return out
 
 
-_TS_PATTERNS = [
-    re.compile(r"^(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\s*->\s*"),               # Arduino IDE
-    re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\]\s*"),                 # [12:34:56.789]
-    re.compile(r"^\d{4}-\d{2}-\d{2}[T ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,6}))?(?:Z|[+-]\d{2}:?\d{2})?\s*"),  # ISO
-    re.compile(r"^\w{3} +\d{1,2} (\d{2}):(\d{2}):(\d{2}) \S+ \S+: "),                # journalctl
-    re.compile(r"^(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\s+"),                      # plain clock
-]
-
-
-def split_timestamp(line: str) -> Tuple[Optional[float], str]:
-    """Seconds since midnight (or None) and the line without its timestamp prefix."""
-    for pat in _TS_PATTERNS:
-        m = pat.match(line)
-        if m:
-            g = m.groups()
-            frac = g[3] if len(g) > 3 and g[3] else "0"
-            t = int(g[0]) * 3600 + int(g[1]) * 60 + int(g[2]) + float("0." + frac)
-            return t, line[m.end():]
-    return None, line
+from radar_sensors import split_timestamp  # noqa: E402  (the same prefixes decode_capture accepts)
 
 
 def kv(text: str) -> Dict[str, str]:
@@ -162,6 +144,7 @@ class Event:
     t: float
     kind: str
     text: str
+    clock: bool = False           # t came from a timestamp on the line, not from a line count
 
 
 @dataclass
@@ -258,7 +241,7 @@ def parse_text_log(path: str, text: str) -> TextLog:
         for kind, pat in NODE_EVENTS + RX_EVENTS:
             m = pat.match(line)
             if m:
-                log.events.append(Event(t, kind, line))
+                log.events.append(Event(t, kind, line, t_clock is not None))
                 matched = True
                 break
         if not matched and not line.startswith(("[", "radar UART", "RadarLink")):
@@ -302,18 +285,26 @@ def analyze_node(log: TextLog, rep: Report) -> None:
     if not ns:
         return
     ups = [s.up for s in ns]
-    reboots = sum(1 for a, b in zip(ups, ups[1:]) if b < a) + sum(1 for e in log.events if e.kind == "node_boot")
+    resets = sum(1 for a, b in zip(ups, ups[1:]) if b < a)
+    banners = sum(1 for e in log.events if e.kind == "node_boot")
+    reboots = max(resets, banners - 1 if banners else 0)       # the first banner is the boot the log starts with
     settled = [s for s in ns if s.up >= DIAG_SETTLE_S]
     last = ns[-1]
     span = max(ups) - min(ups)
     lines = [f"{len(ns)} samples, uptime {min(ups)}..{max(ups)} s ({span} s covered), {reboots} reboot(s) seen"]
-    # radar
+    # radar. bytes, bad frames, CRC errors and reconfigurations are counters since
+    # boot, so everything is measured as the growth over the lines in this log
+    # (positive steps only: a reboot restarts the counters).
     fps = [s.radar_fps for s in settled]
     frames_est = sum(s.radar_fps for s in ns) * STAT_INTERVAL_S          # fps is a one-second count sampled every 2 s
     zero = sum(1 for f in fps if f == 0)
-    bad_pct = pct(last.radar_bad, frames_est)
-    lines.append(f"radar frames/s: {stats(fps)}; {zero} sample(s) at 0 fps; bytes {last.radar_bytes}; "
-                 f"bad frames {last.radar_bad} (~{bad_pct:.1f}% of ~{frames_est:.0f} frames); reconfigured {last.reconf}x; "
+    bytes_delta = sum(max(0, b.radar_bytes - a.radar_bytes) for a, b in zip(ns, ns[1:])) if len(ns) > 1 else last.radar_bytes
+    bad_delta = sum(max(0, b.radar_bad - a.radar_bad) for a, b in zip(ns, ns[1:])) if len(ns) > 1 else last.radar_bad
+    reconf_delta = sum(max(0, b.reconf - a.reconf) for a, b in zip(ns, ns[1:])) if len(ns) > 1 else last.reconf
+    bad_pct = pct(bad_delta, frames_est)
+    lines.append(f"radar frames/s: {stats(fps)}; {zero} sample(s) at 0 fps; {bytes_delta} bytes received during the log; "
+                 f"bad frames +{bad_delta} (~{bad_pct:.1f}% of ~{frames_est:.0f} frames; {last.radar_bad} since boot); "
+                 f"reconfigured {reconf_delta}x during the log ({last.reconf} since boot); "
                  f"configured in {sum(1 for s in settled if s.cfg)}/{len(settled)} samples")
     rep.series["radar fps"] = ([s.up for s in ns], [s.radar_fps for s in ns])
     # lidar
@@ -322,10 +313,15 @@ def analyze_node(log: TextLog, rep: Report) -> None:
         lf = [s.lidar["fps"] for s in settled if s.lidar]
         lp = [s.lidar["pps"] for s in settled if s.lidar]
         sp = [s.lidar["speed"] for s in settled if s.lidar and s.lidar["speed"]]
-        crc = last.lidar["crc"] if last.lidar else 0
-        lframes = sum(s.lidar["fps"] for s in ns if s.lidar) * STAT_INTERVAL_S
+        lsamples = [s for s in ns if s.lidar]
+        crc_delta = (sum(max(0, b.lidar["crc"] - a.lidar["crc"]) for a, b in zip(lsamples, lsamples[1:]))
+                     if len(lsamples) > 1 else lsamples[-1].lidar["crc"])
+        lbytes_delta = (sum(max(0, b.lidar["bytes"] - a.lidar["bytes"]) for a, b in zip(lsamples, lsamples[1:]))
+                        if len(lsamples) > 1 else lsamples[-1].lidar["bytes"])
+        lframes = sum(s.lidar["fps"] for s in lsamples) * STAT_INTERVAL_S
         lines.append(f"lidar frames/s: {stats(lf)}; points/s: {stats(lp)}; scan speed deg/s: {stats(sp)}; "
-                     f"CRC errors {crc} (~{pct(crc, lframes):.2f}% of ~{lframes:.0f} frames)")
+                     f"CRC errors +{crc_delta} (~{pct(crc_delta, lframes):.2f}% of ~{lframes:.0f} frames; "
+                     f"{lsamples[-1].lidar['crc']} since boot); {lbytes_delta} bytes during the log")
         rep.series["lidar fps"] = ([s.up for s in ns if s.lidar], [s.lidar["fps"] for s in ns if s.lidar])
         rep.series["lidar pps"] = ([s.up for s in ns if s.lidar], [s.lidar["pps"] for s in ns if s.lidar])
     # wifi
@@ -349,23 +345,23 @@ def analyze_node(log: TextLog, rep: Report) -> None:
     if log.diag_lines:
         rep.sections.append(("node's own diag output", log.diag_lines))
     rep.metrics.update(node_samples=len(ns), node_reboots=reboots, radar_fps_median=statistics.median(fps) if fps else None,
-                       radar_bad=last.radar_bad, radar_bad_pct=round(bad_pct, 2), radar_reconf=last.reconf,
+                       radar_bad=bad_delta, radar_bad_pct=round(bad_pct, 2), radar_reconf=reconf_delta,
                        lidar=bool(has_lidar), subscriber_timeouts=timeouts, heap_min=min(heaps) if heaps else None)
 
     # diagnosis with the node_diag.h rules, applied to the end of the log
-    if reboots > 1:
-        rep.say("WARN", f"the node rebooted {reboots} times: brown-outs (check the 5 V/battery path) or crashes; "
-                        "note the last lines before each 'RadarLink sensor node' banner")
+    if reboots >= 1:
+        rep.say("WARN", f"the node rebooted {reboots} time{'s' if reboots > 1 else ''} during this log: brown-outs (check the "
+                        "5 V/battery path) or crashes; note the last lines before each 'RadarLink sensor node' banner")
     if last.up < DIAG_SETTLE_S or not settled:
         rep.say("INFO", "log too short to judge the sensors (under 3 s of uptime)")
     else:
-        if last.radar_bytes == 0:
-            rep.say("FAIL", "radar: no bytes at all: RD-03D not powered (needs 5 V), TX not on D0/GPIO1, or no common ground")
-        elif frames_est == 0 and last.radar_bad == 0:
-            rep.say("FAIL", "radar: bytes arrive but no frame was ever decoded: wrong baud (must be 256000) or line noise; "
+        if bytes_delta == 0:
+            rep.say("FAIL", "radar: no bytes arrived during this log: RD-03D not powered (needs 5 V), TX not on D0/GPIO1, or no common ground")
+        elif frames_est == 0 and bad_delta == 0:
+            rep.say("FAIL", "radar: bytes arrive but no frame was decoded: wrong baud (must be 256000) or line noise; "
                             "capture with 'raw radar' and run tools/decode_capture.py")
         elif frames_est == 0:
-            rep.say("FAIL", f"radar: {last.radar_bad} frames with a bad tail and none good: lost bytes or an unexpected frame layout")
+            rep.say("FAIL", f"radar: {bad_delta} frames with a bad tail and none good: lost bytes or an unexpected frame layout")
         else:
             if bad_pct > RADAR_BAD_PCT_MAX:
                 rep.say("WARN", f"radar: {bad_pct:.0f}% bad frames: supply ripple or lost bytes; add 220 uF + 10 uF at the module")
@@ -373,24 +369,23 @@ def analyze_node(log: TextLog, rep: Report) -> None:
                 rep.say("WARN" if zero > len(settled) * 0.1 else "INFO",
                         f"radar: {zero} of {len(settled)} samples had no frame in the counted second"
                         + ("" if zero <= len(settled) * 0.1 else ": intermittent supply or wiring"))
-            if last.reconf:
-                rep.say("WARN", f"radar: the node re-sent the configuration {last.reconf} time(s): the module went silent for 5 s each time (supply dips)")
+            if reconf_delta:
+                rep.say("WARN", f"radar: the node re-sent the configuration {reconf_delta} time(s) during this log: the module went silent for 5 s each time (supply dips)")
             med = statistics.median(fps) if fps else 0
             if fps and (med < RADAR_FPS_MIN or med > RADAR_FPS_MAX):
                 rep.say("WARN", f"radar: median frame rate {med:g}/s is outside {RADAR_FPS_MIN}..{RADAR_FPS_MAX}")
             if not any(lv == "FAIL" or (lv == "WARN" and t.startswith("radar")) for lv, t in rep.issues):
                 rep.say("OK", f"radar: {med:g} frames/s, {bad_pct:.1f}% bad frames")
         if has_lidar and last.lidar:
-            L = last.lidar
             lmed = statistics.median([s.lidar["fps"] for s in settled if s.lidar]) if settled else 0
-            if L["bytes"] == 0:
-                rep.say("FAIL", "lidar: no bytes: LD19 not powered (5 V, 180 mA+), TX not on D2/GPIO3, or no common ground; is the motor turning?")
-            elif lframes == 0 and L["crc"] == 0:
+            if lbytes_delta == 0:
+                rep.say("FAIL", "lidar: no bytes arrived during this log: LD19 not powered (5 V, 180 mA+), TX not on D2/GPIO3, or no common ground; is the motor turning?")
+            elif lframes == 0 and crc_delta == 0:
                 rep.say("FAIL", "lidar: bytes but never a frame: wrong baud (must be 230400) or another device on that pin")
             elif lframes == 0:
-                rep.say("FAIL", f"lidar: {L['crc']} CRC failures and no good frame: baud mismatch, lost bytes or noise")
+                rep.say("FAIL", f"lidar: {crc_delta} CRC failures and no good frame: baud mismatch, lost bytes or noise")
             else:
-                crc_pct = pct(L["crc"], lframes)
+                crc_pct = pct(crc_delta, lframes)
                 if crc_pct > LIDAR_CRC_PCT_MAX:
                     rep.say("WARN", f"lidar: {crc_pct:.1f}% CRC errors: supply ripple or a long unshielded lead")
                 if sp and (statistics.median(sp) < LIDAR_SPEED_MIN or statistics.median(sp) > LIDAR_SPEED_MAX):
@@ -448,9 +443,17 @@ def analyze_receiver(samples: List[RxSample], events: List[Event], name: str, re
             lines.append(f"RSSI at connect: {stats(rssi)} dBm")
             if min(rssi) < -75:
                 rep.say("WARN", f"{name}: weak signal ({min(rssi)} dBm): move closer, plug the u.FL antenna in, change WIFI_CHANNEL")
-        gaps = [b.t - a.t for a, b in zip(attempts, attempts[1:])]
-        if gaps and max(gaps) > 50 and any(e.t for e in attempts):
-            rep.say("WARN", f"{name}: {sum(1 for g in gaps if g > 50)} join attempt(s) took about a minute: the join worked but DHCP did not answer; power-cycle the node")
+        # how long each attempt took: from its "connecting" line to the next failed/connected line
+        outcomes = sorted([e for e in events if e.kind in ("connect_failed", "connected")], key=lambda e: e.t)
+        slow = 0
+        for a in attempts:
+            if not a.clock:
+                continue                                       # a line count is not a duration
+            end = next((o for o in outcomes if o.t > a.t), None)
+            if end is not None and end.t - a.t > 50:
+                slow += 1
+        if slow:
+            rep.say("WARN", f"{name}: {slow} join attempt(s) took about a minute: the join worked but DHCP did not answer; power-cycle the node")
         for code, n in codes.items():
             meaning = WIFI_STATUS.get(int(code), f"status {code}")
             rep.say("FAIL" if not connected else "INFO", f"{name}: {n}x {meaning}")
@@ -626,6 +629,9 @@ def analyze_recording(path: str, data: bytes, rep: Report) -> None:
         p = pct(gap, counts[ptype] + gap)
         if p > 2:
             rep.say("WARN", f"{names.get(ptype, ptype)}: {p:.1f}% of datagrams never arrived: weak link, power save on the receiver, or a busy channel")
+    if bad:
+        rep.say("FAIL" if bad == len(recs) else "WARN",
+                f"{bad} of {len(recs)} datagrams are not RadarLink v1 packets: a protocol mismatch or a damaged file")
     if not rep.issues:
         rep.say("OK", "recording looks healthy")
 

@@ -128,7 +128,7 @@ class NodeLogs(unittest.TestCase):
         self.assertEqual(rep.worst, "OK", rep.issues)
         self.assertTrue(any(t.startswith("radar: 20 frames/s") for t in issue_texts(rep, "OK")), rep.issues)
         self.assertTrue(any(t.startswith("lidar: 375 frames/s") for t in issue_texts(rep, "OK")), rep.issues)
-        self.assertEqual(rep.metrics["node_reboots"], 1)
+        self.assertEqual(rep.metrics["node_reboots"], 0)
         self.assertEqual(rep.metrics["radar_fps_median"], 20)
         self.assertIn("sensor node", dict(rep.sections))
         text = "\n".join(rep.render())
@@ -138,7 +138,7 @@ class NodeLogs(unittest.TestCase):
     def test_radar_unpowered(self):
         rep = analyze_text(node_log(bytes0=True, lidar=False))
         self.assertEqual(rep.worst, "FAIL")
-        self.assertTrue(any("no bytes at all" in t for t in issue_texts(rep, "FAIL")), rep.issues)
+        self.assertTrue(any("no bytes arrived" in t for t in issue_texts(rep, "FAIL")), rep.issues)
         self.assertFalse(rep.metrics["lidar"])
 
     def test_reconfig_and_leak(self):
@@ -156,9 +156,29 @@ class NodeLogs(unittest.TestCase):
 
     def test_reboots_and_short_log(self):
         rep = analyze_text(node_log(seconds=20) + node_log(seconds=20))
-        self.assertTrue(any("rebooted 3 times" in t or "rebooted" in t for t in issue_texts(rep, "WARN")), rep.issues)
+        self.assertTrue(any("rebooted 1 time during" in t for t in issue_texts(rep, "WARN")), rep.issues)
+        self.assertEqual(rep.metrics["node_reboots"], 1)
+        rep = analyze_text(node_log(seconds=20, boot_banner=False) + node_log(seconds=20, boot_banner=False))
+        self.assertEqual(rep.metrics["node_reboots"], 1)                     # the uptime reset alone counts too
         rep = analyze_text("[stat] up=2s ap=up sta=0 subs=0 | radar fps=0 bytes=0 bad=0 cfg=0 reconf=0 | heap=250000\n")
         self.assertTrue(any("too short" in t for t in issue_texts(rep, "INFO")), rep.issues)
+
+    def test_excerpt_uses_counter_growth(self):
+        # a log copied after an hour: bad=720 since boot (1 %) must not read as 60 % of the excerpt
+        lines = []
+        for i in range(30):
+            up = 3600 + 2 * i
+            lines.append(f"[stat] up={up}s ap=up sta=1 subs=1 | radar fps=20 bytes={up * 600} bad=720 cfg=1 reconf=3"
+                         f" | lidar fps=375 pps=4100 bytes={up * 17625} crc=50 speed=3600 | heap=250000")
+        rep = analyze_text("\n".join(lines) + "\n")
+        self.assertEqual(rep.worst, "OK", rep.issues)
+        self.assertEqual(rep.metrics["radar_bad"], 0)
+        self.assertEqual(rep.metrics["radar_reconf"], 0)
+        # the same excerpt with 100 new bad frames inside the window: 100 of ~1200
+        lines2 = [l.replace("bad=720", f"bad={720 + (i * 100) // 29}") for i, l in enumerate(lines)]
+        rep = analyze_text("\n".join(lines2) + "\n")
+        self.assertTrue(any("bad frames" in t for t in issue_texts(rep, "INFO") + issue_texts(rep, "WARN")) or rep.metrics["radar_bad"] == 100, rep.metrics)
+        self.assertEqual(rep.metrics["radar_bad"], 100)
 
     def test_diag_lines_pass_through(self):
         rep = analyze_text(node_log() + "[diag] OK   radar: 20 frames/s\n[diag] result: all OK\n")
@@ -184,6 +204,19 @@ class ReceiverLogs(unittest.TestCase):
         self.assertTrue(any("weak signal" in t for t in issue_texts(rep, "WARN")), rep.issues)
         rep = analyze_text(giga_log(failures=0, drop=10))
         self.assertTrue(any("dropped" in t for t in issue_texts(rep, "WARN")), rep.issues)
+
+    def test_reconnect_is_not_a_dhcp_timeout(self):
+        # 40 samples of normal operation between two quick joins, no clock timestamps
+        text = giga_log(failures=0, samples=40) + "[wifi] no packets for a long time, reconnecting\n" + giga_log(failures=0, samples=5).split("\n", 1)[1]
+        rep = analyze_text(text)
+        self.assertFalse(any("DHCP" in t for t in issue_texts(rep)), rep.issues)
+        self.assertTrue(any("reconnect" in t for t in issue_texts(rep, "WARN")), rep.issues)
+        # a real 60 s attempt, with clock timestamps, is reported
+        text = ("10:00:00.000 -> [wifi] connecting to RadarSystem\n"
+                "10:01:02.000 -> [wifi] connected, IP 192.168.4.2, sensor node 192.168.4.1, RSSI -50\n"
+                "10:01:04.000 -> [stat] link=up data=ok rx/s=60 total=120 drop=0 foreign=0 fps=15\n")
+        rep = analyze_text(text)
+        self.assertTrue(any("DHCP" in t for t in issue_texts(rep, "WARN")), rep.issues)
 
     def test_viewer_with_timestamps_and_alerts(self):
         rep = analyze_text(viewer_log())
@@ -217,6 +250,19 @@ class Recordings(unittest.TestCase):
         self.assertTrue(any("never arrived" in t for t in warns), rep.issues)
         self.assertTrue(any("rebooted 1 time" in t for t in warns), rep.issues)
 
+    def test_undecodable_datagrams(self):
+        buf = io.BytesIO()
+        rec = rs.Recorder(buf, 0.0)
+        rec.write(0.0, b"not a radarlink packet")
+        rep = analyze_bytes(buf.getvalue())
+        self.assertEqual(rep.worst, "FAIL")
+        self.assertTrue(any("not RadarLink" in t for t in issue_texts(rep, "FAIL")), rep.issues)
+        data = recording(seconds=2)
+        buf = io.BytesIO(data[:-0] if False else data)
+        rec_tail = rs._RECORD_HDR.pack(3.0, 5) + b"\x00" * 5
+        rep = analyze_bytes(data + rec_tail)
+        self.assertTrue(any("not RadarLink" in t for t in issue_texts(rep, "WARN")), rep.issues)
+
     def test_not_a_recording(self):
         rep = analyze_bytes(rs.RECORD_MAGIC + b"\x00")
         self.assertEqual(rep.worst, "FAIL")
@@ -248,7 +294,7 @@ class Cli(unittest.TestCase):
             pathlib.Path(log).write_text(node_log(bytes0=True))
             r = subprocess.run([sys.executable, str(ROOT / "tools" / "analyze_log.py"), log], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1)
-            self.assertIn("FAIL radar: no bytes at all", r.stdout)
+            self.assertIn("FAIL radar: no bytes arrived during this log", r.stdout)
 
 
 if __name__ == "__main__":

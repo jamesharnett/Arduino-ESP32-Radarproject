@@ -85,11 +85,12 @@ class Probe:
                         self.say(f"[raw {self.sensor}] " + " ".join(f"{b:02X}" for b in pending[:32]))
                         del pending[:32]
                 if self.sensor == "radar":
-                    for f in self.radar.feed_bytes(chunk):
+                    frames = self.radar.feed_bytes(chunk)
+                    for k, f in enumerate(frames, self.radar.frames - len(frames) + 1):
                         radar_frames_sec += 1
                         if verbose:
                             kept = [t for t in sn.rd03d_process(f) if t.valid]
-                            self.say(f"frame {self.radar.frames:5d}  "
+                            self.say(f"frame {k:5d}  "
                                      + (" ".join(f"[{t.x_mm:+5d},{t.y_mm:+5d} mm {t.distance_mm / 1000:4.2f} m {t.speed_cm_s:+4d} cm/s]" for t in kept)
                                         or "no target"))
                 else:

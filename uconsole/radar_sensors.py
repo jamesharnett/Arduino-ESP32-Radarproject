@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import re
+import struct
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -113,13 +114,28 @@ def _c_half(v: int) -> int:
     return -((-v) // 2) if v < 0 else v // 2
 
 
+def _f32(v: float) -> float:
+    """Round to IEEE single precision, the way the firmware's float arithmetic does."""
+    return struct.unpack("f", struct.pack("f", v))[0]
+
+
+def f32_distance(x: int, y: int) -> float:
+    """sqrtf((float)x*(float)x + (float)y*(float)y) exactly as rd03d_parser.h computes it.
+
+    On the 8 m boundary the single-precision sum can round down (for example
+    (1, 8000) sums to 64 000 000 instead of 64 000 001), which keeps a target the
+    double-precision hypot would have dropped; the mirror must agree with the node.
+    """
+    return _f32(math.sqrt(_f32(_f32(float(x) * float(x)) + _f32(float(y) * float(y)))))
+
+
 def rd03d_process(frame: Rd03dFrame, options: Rd03dOptions = Rd03dOptions()) -> List[rp.RadarTarget]:
     """What the node puts on the wire for this frame (mirror of ``rd03dProcess``)."""
     targets = [rp.RadarTarget() for _ in range(RD03D_SLOTS)]
     for i, slot in enumerate(frame.slots()):
         if slot.empty:
             continue
-        dist = slot.distance_mm
+        dist = f32_distance(slot.x_mm, slot.y_mm)
         if dist <= options.min_dist_mm or dist > options.max_dist_mm:
             continue
         if options.filter_sentinels and rd03d_is_sentinel_speed(slot.speed_cm_s):
@@ -133,7 +149,7 @@ def rd03d_process(frame: Rd03dFrame, options: Rd03dOptions = Rd03dOptions()) -> 
         for j in range(i + 1, RD03D_SLOTS):
             if not targets[j].valid:
                 continue
-            if math.hypot(targets[i].x_mm - targets[j].x_mm, targets[i].y_mm - targets[j].y_mm) >= options.cluster_dist_mm:
+            if f32_distance(targets[i].x_mm - targets[j].x_mm, targets[i].y_mm - targets[j].y_mm) >= options.cluster_dist_mm:
                 continue
             targets[i].x_mm = _c_half(targets[i].x_mm + targets[j].x_mm)
             targets[i].y_mm = _c_half(targets[i].y_mm + targets[j].y_mm)
@@ -347,6 +363,28 @@ def ld19_build_frame(speed_deg_s: int, start_cdeg: int, end_cdeg: int, dist_mm: 
 _HEX_PAIR = re.compile(r"^(?:0x)?[0-9a-fA-F]{2},?$")
 _RAW_PREFIX = re.compile(r"^\s*\[raw (radar|lidar)\]\s*(.*)$")
 
+# Timestamp prefixes serial monitors and journals put in front of a line. Shared
+# with tools/analyze_log.py so both accept the same pastes.
+TIMESTAMP_PATTERNS = [
+    re.compile(r"^(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\s*->\s*"),               # Arduino IDE
+    re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\]\s*"),                 # [12:34:56.789]
+    re.compile(r"^\d{4}-\d{2}-\d{2}[T ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,6}))?(?:Z|[+-]\d{2}:?\d{2})?\s*"),  # ISO
+    re.compile(r"^\w{3} +\d{1,2} (\d{2}):(\d{2}):(\d{2}) \S+ \S+: "),                # journalctl
+    re.compile(r"^(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\s+"),                      # plain clock
+]
+
+
+def split_timestamp(line: str) -> Tuple[Optional[float], str]:
+    """Seconds since midnight (or None) and the line without its timestamp prefix."""
+    for pat in TIMESTAMP_PATTERNS:
+        m = pat.match(line)
+        if m:
+            g = m.groups()
+            frac = g[3] if len(g) > 3 and g[3] else "0"
+            t = int(g[0]) * 3600 + int(g[1]) * 60 + int(g[2]) + float("0." + frac)
+            return t, line[m.end():]
+    return None, line
+
 
 def parse_hex_dump(text: str) -> Tuple[Optional[str], bytes]:
     """Bytes from a ``raw radar`` / ``raw lidar`` console paste, a plain hex dump or a C array.
@@ -358,6 +396,7 @@ def parse_hex_dump(text: str) -> Tuple[Optional[str], bytes]:
     source: Optional[str] = None
     out = bytearray()
     for line in text.splitlines():
+        _, line = split_timestamp(line.rstrip("\r"))
         m = _RAW_PREFIX.match(line)
         if m:
             source = source or m.group(1)

@@ -106,6 +106,8 @@ class SensorProbe(unittest.TestCase):
         self.assertEqual(port.written, sn.RD03D_CMD_ENABLE_CONFIG + sn.RD03D_CMD_MULTI_TARGET + sn.RD03D_CMD_END_CONFIG)
         self.assertIn("module replied: enable configuration OK", text)
         self.assertIn("[+1000,+3000 mm 3.16 m  -40 cm/s]", text)
+        numbers = [int(l.split()[1]) for l in text.splitlines() if l.startswith("frame ")]
+        self.assertEqual(numbers, list(range(1, 41)))                                # every frame numbered in order
         self.assertEqual((rep.frames, rep.bad_frames), (40, 0))
         self.assertEqual(len(rep.acks), 3)                       # one reply per command
         self.assertTrue(rep.ok)

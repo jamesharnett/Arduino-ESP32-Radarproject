@@ -35,6 +35,7 @@
 #define RADAR_RX_BUFFER    1024       /* bytes; default 256 overflows easily    */
 #define LIDAR_RX_BUFFER    4096       /* 375 frames/s x 47 bytes                */
 #define DEBUG_BAUD         115200
+#define SERIAL_TX_BUFFER   4096       /* USB CDC transmit ring; default 256 drops multi-line replies */
 
 /* ---------------------------------------------------------- radar handling */
 #define RADAR_MIN_DIST_MM          100
@@ -53,10 +54,10 @@
 
 /* Serial console "raw radar|lidar [N]": bytes are buffered in RAM while the
  * parsers keep running, then printed as hex a few lines per loop() pass.       */
-#define RAW_CAPTURE_MAX            6144   /* buffer; 204 radar or 130 LD19 frames */
-#define RAW_DEFAULT_RADAR_BYTES    600    /* 20 RD-03D frames                    */
-#define RAW_DEFAULT_LIDAR_BYTES    4700   /* 100 LD19 frames                     */
-#define RAW_CAPTURE_TIMEOUT_MS     10000  /* give up (and dump what came) after this */
+#define RAW_CAPTURE_MAX            6144   /* buffer: 20 s of radar frames or 130 LD19 frames */
+#define RAW_DEFAULT_RADAR_BYTES    600    /* 20 RD-03D frames (2 s)              */
+#define RAW_DEFAULT_LIDAR_BYTES    4700   /* 100 LD19 frames (0.27 s)            */
+#define RAW_CAPTURE_TIMEOUT_MS     3000   /* base timeout; 1.5x the healthy transfer time is added per request */
 #define RAW_DUMP_BYTES_PER_LINE    32
 #define RAW_DUMP_LINES_PER_LOOP    4
 
